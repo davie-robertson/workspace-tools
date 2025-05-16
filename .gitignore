@@ -1,0 +1,28 @@
+# Node.js
+node_modules/
+.env
+.env.*
+*.local
+npm-debug.log*
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Google Workspace Scanner credentials and sensitive files
+workspace-scanner-credentials.json
+workspace-scanner-*.json
+!package.json
+
+# Output
+*.csv
+*.xlsx
+
+# Misc
+*.log
+
+# Ignore output Google Sheets exports
+*.gsheet
