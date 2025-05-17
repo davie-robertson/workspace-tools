@@ -179,30 +179,37 @@ async function main() {
             let links = [];
             let fileType = getFileType(file.mimeType);
             try {
-                if (file.mimeType === 'application/vnd.google-apps.document') {
-                    links = await findLinksInDoc(docs, drive, file.id, mainSpinner);
-                    userStats[user.primaryEmail].doc++;
-                    totalStats.doc++;
-                    if (links.length > 0) {
-                        userStats[user.primaryEmail].docWithLinks++;
-                        totalStats.docWithLinks++;
-                    }
-                } else if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
-                    links = await findLinksInSheet(sheets, drive, file.id, mainSpinner);
-                    userStats[user.primaryEmail].sheet++;
-                    totalStats.sheet++;
-                    if (links.length > 0) {
-                        userStats[user.primaryEmail].sheetWithLinks++;
-                        totalStats.sheetWithLinks++;
-                    }
-                } else if (file.mimeType === 'application/vnd.google-apps.presentation') {
-                    links = await findLinksInSlide(slides, drive, file.id, mainSpinner);
-                    userStats[user.primaryEmail].slide++;
-                    totalStats.slide++;
-                    if (links.length > 0) {
-                        userStats[user.primaryEmail].slideWithLinks++;
-                        totalStats.slideWithLinks++;
-                    }
+                switch (file.mimeType) {
+                    case 'application/vnd.google-apps.document':
+                        links = await findLinksInDoc(docs, drive, file.id, mainSpinner);
+                        userStats[user.primaryEmail].doc++;
+                        totalStats.doc++;
+                        if (links.length > 0) {
+                            userStats[user.primaryEmail].docWithLinks++;
+                            totalStats.docWithLinks++;
+                        }
+                        break;
+                    case 'application/vnd.google-apps.spreadsheet':
+                        links = await findLinksInSheet(sheets, drive, file.id, mainSpinner);
+                        userStats[user.primaryEmail].sheet++;
+                        totalStats.sheet++;
+                        if (links.length > 0) {
+                            userStats[user.primaryEmail].sheetWithLinks++;
+                            totalStats.sheetWithLinks++;
+                        }
+                        break;
+                    case 'application/vnd.google-apps.presentation':
+                        links = await findLinksInSlide(slides, drive, file.id, mainSpinner);
+                        userStats[user.primaryEmail].slide++;
+                        totalStats.slide++;
+                        if (links.length > 0) {
+                            userStats[user.primaryEmail].slideWithLinks++;
+                            totalStats.slideWithLinks++;
+                        }
+                        break;
+                    default:
+                        // Do nothing for other mime types
+                        break;
                 }
             } catch (e) {
                 mainSpinner.warn(`Error reading file ${file.name} (${file.id}): ${e.message}`);
