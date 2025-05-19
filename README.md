@@ -85,14 +85,24 @@ This Node.js (ESM) project scans all Google Workspace files (Docs, Sheets, Slide
    ```
 ## Command Line Filtering
 
-You can optionally filter which users and document types are processed by passing CLI arguments:
+You can optionally filter which users and document types are processed, and how JSON output is handled, by passing CLI arguments:
 
 ```
-node index.js --users user1@domain.com,user2@domain.com --types doc,sheet,slide
+node index.js --users user1@domain.com,user2@domain.com --types doc,sheet,slide --json-output <filepath> --json-output-mode append
 ```
 
 - `--users` (optional): Comma-separated list of user emails to process. If omitted, all users are processed.
 - `--types` (optional): Comma-separated list of document types to process. Valid values: `doc`, `sheet`, `slide`. If omitted, all types are processed.
+- `--json-output <filepath>` (optional): Specify a file path to output the results in JSON format. If this is provided, Google Sheet output (via `OUTPUT_SHEET_ID`) will be skipped unless `OUTPUT_SHEET_ID` is also set (in which case both outputs may occur, though typically one or the other is used).
+- `--json-output-mode <mode>` (optional, requires `--json-output`): Specifies how to handle the JSON output file if it already exists.
+    - `overwrite` (default): The existing JSON file will be completely replaced with the new scan data.
+    - `append`: New scan data will be added to the existing JSON file.
+        - `files`: The list of scanned files from the new run will be added to the existing list.
+        - `summary.totalStats`: Numerical statistics will be summed up with existing totals.
+        - `summary.userStats`: Statistics for each user will be summed. New users from the current scan will be added.
+        - `summary.generationDate`: Will be updated to the timestamp of the latest scan.
+        - If the specified JSON file for appending doesn't exist, a new file will be created.
+        - If there's an error reading or parsing an existing file during an append operation, the script will default to overwriting the file with the current scan's data and log a warning.
 
 Examples:
 
@@ -108,7 +118,15 @@ Examples:
   ```
   node index.js --users alice@example.com --types sheet
   ```
-
+- Output to a JSON file, overwriting if it exists:
+  ```
+  node index.js --json-output scan_results.json
+  ```
+  (or `node index.js --json-output scan_results.json --json-output-mode overwrite`)
+- Output to a JSON file, appending to it if it exists, creating it if not:
+  ```
+  node index.js --json-output scan_results.json --json-output-mode append
+  ```
 
 2. **View results**
    - Open your Google Sheet. The script will clear the first sheet and write all results there.
