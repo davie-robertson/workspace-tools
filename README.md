@@ -31,7 +31,7 @@ This Node.js (ESM) project scans all Google Workspace files (Docs, Sheets, Slide
 1. **Get the project files**
    - If you have Git installed:
      ```bash
-     git clone <your-repo-url>
+     git clone https://github.com/davie-robertson/workspace-tools.git
      cd workspace-tools
      ```
    - If you do **not** have Git installed:
