@@ -501,7 +501,9 @@ async function main() {
             continue; // Skip this file
           }
 
-          mainSpinner.text = `User ${userEmail} (${idx + 1}/${usersToScan.length}) - File ${fileIdx + 1}/${files.length}: ${file.name}`;
+          const fileProgressText = `User ${userEmail} (${idx + 1}/${usersToScan.length}) - File ${fileIdx + 1}/${files.length}: ${file.name}`;
+          mainSpinner.text = fileProgressText;
+
           const fileType = getFileType(file.mimeType);
           let links = [];
           let incompatibleFunctions = [];
@@ -509,8 +511,9 @@ async function main() {
           // Update total and user stats for the type of file being processed.
           if (fileType === 'Google Doc') { totalStats.doc++; userStats[userEmail].doc++; }
           else if (fileType === 'Google Sheet') { totalStats.sheet++; userStats[userEmail].sheet++; }
-          else if (fileType === 'Google Slide') { totalStats.slide++; userStats[userEmail].slide++; }
-          else { totalStats.other++; userStats[userEmail].other++; }
+          else if (fileType === 'Google Slide') { totalStats.slide++; userStats[userEmail].slide++; } // Added for completeness
+          else { totalStats.other++; userStats[userEmail].other++; } // Added for completeness
+
 
           try {
             // Scan the file for links and incompatible functions based on its type.
@@ -521,20 +524,45 @@ async function main() {
             // Consider if `auth` should be re-scoped per user for these calls if granular access is an issue.
             if (file.mimeType === 'application/vnd.google-apps.document') {
               links = await findLinksInDoc(docs, drive, file.id, mainSpinner);
-              if (links.length > 0) { totalStats.docWithLinks++; userStats[userEmail].docWithLinks++; }
             } else if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
               const sheetData = await findLinksInSheet(sheets, drive, file.id, mainSpinner);
               links = sheetData.links;
               incompatibleFunctions = sheetData.incompatibleFunctions;
-              if (links.length > 0) { totalStats.sheetWithLinks++; userStats[userEmail].sheetWithLinks++; }
-              if (incompatibleFunctions.length > 0) { totalStats.sheetWithIncompatibleFunctions++; userStats[userEmail].sheetWithIncompatibleFunctions++; }
             } else if (file.mimeType === 'application/vnd.google-apps.presentation') {
               links = await findLinksInSlide(slides, drive, file.id, mainSpinner);
-              if (links.length > 0) { totalStats.slideWithLinks++; userStats[userEmail].slideWithLinks++; }
+            } else if (file.mimeType === 'application/vnd.google-apps.folder') {
+              // Folders are not scanned for content, already handled by file listing.
+              // No specific action needed here for folders regarding link scanning.
+            } else {
+              // 'other' types are counted but not scanned for links in this structure.
+              // If other types could have links and need scanning, add logic here.
             }
-            // 'other' types are counted but not scanned for links in this structure.
-            // If other types could have links and need scanning, add logic here.
 
+            // Update stats based on links found
+            if (links.length > 0) {
+              switch (fileType) {
+                case 'Google Doc':
+                  totalStats.docWithLinks++;
+                  userStats[userEmail].docWithLinks++;
+                  break;
+                case 'Google Sheet':
+                  totalStats.sheetWithLinks++;
+                  userStats[userEmail].sheetWithLinks++;
+                  break;
+                case 'Google Slide':
+                  totalStats.slideWithLinks++;
+                  userStats[userEmail].slideWithLinks++;
+                  break;
+                // case 'Other': // 'Other' not currently scanned for links
+                //   totalStats.otherWithLinks++; 
+                //   userStats[userEmail].otherWithLinks++;
+                //   break;
+              }
+            }
+            if (incompatibleFunctions.length > 0 && fileType === 'Google Sheet') {
+              totalStats.sheetWithIncompatibleFunctions++; userStats[userEmail].sheetWithIncompatibleFunctions++;
+            }
+            mainSpinner.text = fileProgressText; // Reset spinner to file progress after successful scan operations
           } catch (scanError) {
             mainSpinner.warn(`Could not scan file ${file.name} (${file.id}) for user ${userEmail}: ${scanError.message}. Skipping this file's content scan.`);
             // Log the error but continue with the next file.
@@ -1534,7 +1562,7 @@ async function findLinksInSlide(slides, drive, slideId, spinner) {
       }
       // Recursively process elements within groups.
       if (el.elementGroup?.children) {
-        processPageElements(el.elementGroup.children);
+               processPageElements(el.elementGroup.children);
       }
       // Other element types (e.g., tables, word art) could be added here if they can contain links.
     }
