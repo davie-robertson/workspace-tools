@@ -1,7 +1,7 @@
 {
   "name": "workspace-tools",
   "version": "1.0.0",
-  "description": "Scan Google Workspace files for all users, count them, and list links to other Workspace files.",
+  "description": "Scan Google Workspace files for all users, count them, list links to other Workspace files, and check for functions/formulas in Google Sheets that might cause migration issues.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
