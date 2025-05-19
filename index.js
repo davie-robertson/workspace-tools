@@ -29,8 +29,40 @@ function parseArgs() {
   return result;
 }
 
+// Added validation for CLI arguments
+function validateArgs(argv) {
+  if (argv['json-output-mode'] && !['overwrite', 'append'].includes(argv['json-output-mode'])) {
+    throw new Error("Invalid value for '--json-output-mode'. Allowed values are 'overwrite' or 'append'.");
+  }
+
+  if (argv.types) {
+    const validTypes = ['doc', 'sheet', 'slide'];
+    const invalidTypes = argv.types.split(',').map((t) => t.trim().toLowerCase()).filter((t) => !validTypes.includes(t));
+    if (invalidTypes.length > 0) {
+      throw new Error(`Invalid file types specified in '--types': ${invalidTypes.join(', ')}. Allowed types are ${validTypes.join(', ')}.`);
+    }
+  }
+
+  if (argv.file && typeof argv.file !== 'string') {
+    throw new Error("Invalid value for '--file'. It must be a valid file ID string.");
+  }
+
+  if (argv.users && typeof argv.users !== 'string') {
+    throw new Error("Invalid value for '--users'. It must be a comma-separated string of user emails.");
+  }
+}
+
 // Parse the command line arguments
 const argv = parseArgs();
+
+// Validate the parsed arguments
+try {
+  validateArgs(argv);
+} catch (error) {
+  console.error(`Error: ${error.message}`);
+  process.exit(1);
+}
+
 // Process --users argument: split by comma, trim whitespace, convert to lowercase.
 // If not provided, filterUsers will be null (scan all users, unless singleFileId is given).
 const filterUsers = argv.users
