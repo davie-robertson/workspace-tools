@@ -1,7 +1,24 @@
 import 'dotenv/config';
 import fs from 'fs'; // For writing JSON output
-import { GoogleAuth } from 'google-auth-library';
 import { google } from 'googleapis';
+import {
+  callWithRetry,
+  getAuthenticatedClient,
+  processRawUrls,
+} from './API-Calls.js';
+import {
+  extractDriveLinks,
+  extractFunctionNamesFromFormula,
+  extractHyperlinkUrls,
+  extractImageUrls,
+  extractImportrangeIds,
+} from './extract-helpers.js';
+import {
+  appendRows,
+  clearAndSetHeaders,
+  truncateItemsForCell,
+  writeSummaryTab,
+} from './build-sheet.js';
 
 // --- CLI PARAMS ---
 // Parses command-line arguments provided to the script.
@@ -31,24 +48,40 @@ function parseArgs() {
 
 // Added validation for CLI arguments
 function validateArgs(argv) {
-  if (argv['json-output-mode'] && !['overwrite', 'append'].includes(argv['json-output-mode'])) {
-    throw new Error("Invalid value for '--json-output-mode'. Allowed values are 'overwrite' or 'append'.");
+  if (
+    argv['json-output-mode'] &&
+    !['overwrite', 'append'].includes(argv['json-output-mode'])
+  ) {
+    throw new Error(
+      "Invalid value for '--json-output-mode'. Allowed values are 'overwrite' or 'append'."
+    );
   }
 
   if (argv.types) {
     const validTypes = ['doc', 'sheet', 'slide'];
-    const invalidTypes = argv.types.split(',').map((t) => t.trim().toLowerCase()).filter((t) => !validTypes.includes(t));
+    const invalidTypes = argv.types
+      .split(',')
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => !validTypes.includes(t));
     if (invalidTypes.length > 0) {
-      throw new Error(`Invalid file types specified in '--types': ${invalidTypes.join(', ')}. Allowed types are ${validTypes.join(', ')}.`);
+      throw new Error(
+        `Invalid file types specified in '--types': ${invalidTypes.join(
+          ', '
+        )}. Allowed types are ${validTypes.join(', ')}.`
+      );
     }
   }
 
   if (argv.file && typeof argv.file !== 'string') {
-    throw new Error("Invalid value for '--file'. It must be a valid file ID string.");
+    throw new Error(
+      "Invalid value for '--file'. It must be a valid file ID string."
+    );
   }
 
   if (argv.users && typeof argv.users !== 'string') {
-    throw new Error("Invalid value for '--users'. It must be a comma-separated string of user emails.");
+    throw new Error(
+      "Invalid value for '--users'. It must be a comma-separated string of user emails."
+    );
   }
 }
 
@@ -76,15 +109,14 @@ const filterTypes = argv.types
 // Process --file argument: specifies a single file ID to scan.
 const singleFileId = argv.file;
 // Process --json-output argument: specifies the path for the JSON output file.
-// Renamed from 'jsonOutputFile' in argv to 'jsonOutputFilePath' for clarity.
-const jsonOutputFilePath = argv['json-output']; // Matches the new argument name
+export const jsonOutputFilePath = argv['json-output']; // Matches the new argument name
 // Process --json-output-mode argument: 'overwrite' or 'append'.
 const jsonOutputMode = argv['json-output-mode'] || 'overwrite'; // Default to 'overwrite'
 
 // --- ENVIRONMENT VARIABLES ---
 // SECURITY: ADMIN_USER is critical as it defines the user context for Google Workspace Admin SDK calls.
 // This user MUST have necessary administrative privileges.
-const ADMIN_USER = process.env.ADMIN_USER;
+export const ADMIN_USER = process.env.ADMIN_USER;
 // SECURITY: OUTPUT_SHEET_ID is the ID of the Google Sheet where results are written.
 // Ensure this Sheet has appropriate permissions if it contains sensitive audit data.
 const OUTPUT_SHEET_ID = process.env.OUTPUT_SHEET_ID;
@@ -122,7 +154,7 @@ if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
 // - documents.readonly: To read content from Google Docs.
 // - presentations.readonly: To read content from Google Slides.
 // - spreadsheets: To read content from Google Sheets and write audit results (if OUTPUT_SHEET_ID is used).
-const SCOPES = [
+export const SCOPES = [
   'https://www.googleapis.com/auth/admin.directory.user.readonly', // To list users
   'https://www.googleapis.com/auth/drive.readonly', // To list and read files
   'https://www.googleapis.com/auth/documents.readonly', // To read Google Docs
@@ -167,138 +199,7 @@ const GSUITE_SPECIFIC_FUNCTIONS = [
 
 // Maximum number of characters allowed in a single Google Sheet cell.
 // A buffer is included to prevent errors.
-const MAX_CELL_CHARACTERS = 49500; // Max characters for a cell, with some buffer
-
-// --- Helper function to truncate string for sheet cell ---
-// Truncates an array of items (strings) into a single string, separated by `separator`,
-// ensuring the total length does not exceed MAX_CELL_CHARACTERS.
-// Used to prevent errors when writing long lists of links or functions to a Google Sheet cell.
-// `forFunctions` flag is currently unused but could be for future specific formatting.
-function truncateItemsForCell(
-  itemsArray,
-  separator = '; ',
-  forFunctions = false // Unused parameter, consider removing if not planned for future use
-) {
-  if (!itemsArray || itemsArray.length === 0) {
-    return '';
-  }
-
-  let fullString = itemsArray.join(separator);
-  if (fullString.length <= MAX_CELL_CHARACTERS) {
-    return fullString;
-  }
-
-  // If the full string is too long, truncate it item by item.
-  let truncatedString = '';
-  let itemsIncludedCount = 0;
-  for (let i = 0; i < itemsArray.length; i++) {
-    const item = itemsArray[i];
-    // Check if adding the next item (plus separator) would exceed the limit.
-    if (
-      truncatedString.length +
-        (truncatedString ? separator.length : 0) +
-        item.length >
-      MAX_CELL_CHARACTERS - 50 // 50 char buffer for the "and X more items" message
-    ) {
-      break;
-    }
-    if (truncatedString) {
-      truncatedString += separator;
-    }
-    truncatedString += item;
-    itemsIncludedCount++;
-  }
-  const remainingItems = itemsArray.length - itemsIncludedCount;
-  // Add a message indicating truncation and if full list is in JSON.
-  const seeJsonMessage = jsonOutputFilePath ? ', see JSON for full list' : '';
-  truncatedString += `${separator}... (and ${remainingItems} more item${
-    remainingItems > 1 ? 's' : ''
-  }${seeJsonMessage})`;
-
-  // Final check to ensure the truncated message itself isn't too long.
-  if (truncatedString.length > MAX_CELL_CHARACTERS) {
-    return (
-      truncatedString.substring(0, MAX_CELL_CHARACTERS - 50) + // Adjusted buffer
-      `... (TRUNCATED${seeJsonMessage})`
-    );
-  }
-  return truncatedString;
-}
-
-// --- API RETRY HELPER ---
-// A robust wrapper for Google API calls that implements an exponential backoff retry mechanism.
-// This helps handle transient errors like rate limits (403, 429) or server errors (500, 503).
-// `apiCallFunction`: The async function to call (e.g., a Google API request).
-// `maxRetries`: Maximum number of times to retry the API call.
-// `initialDelay`: Initial delay in milliseconds before the first retry.
-async function callWithRetry(
-  apiCallFunction, // The function that makes the API call
-  maxRetries = 5, // Maximum number of retries
-  initialDelay = 1000 // Initial delay in milliseconds for backoff
-) {
-  let retries = 0;
-  while (true) {
-    try {
-      return await apiCallFunction();
-    } catch (error) {
-      const isRetryable =
-        error.code === 403 ||
-        error.code === 429 ||
-        error.code === 500 ||
-        error.code === 503;
-
-      if (isRetryable && retries < maxRetries) {
-        retries++;
-        const delay =
-          initialDelay * Math.pow(2, retries - 1) + Math.random() * 1000;
-        console.warn(
-          `API call failed (attempt ${retries}/${maxRetries}): ${
-            error.message
-          }. Retrying in ${Math.round(delay / 1000)}s...`
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      } else {
-        throw error;
-      }
-    }
-  }
-}
-
-// --- AUTH ---
-// Authenticates with Google APIs using a service account and domain-wide delegation.
-// The service account key is specified by GOOGLE_APPLICATION_CREDENTIALS env var.
-// Impersonates ADMIN_USER for Admin SDK calls and potentially for Drive access if needed broadly,
-// though Drive access is typically per-user in listUserFiles.
-async function getAuthenticatedClient() {
-  try {
-    // Initialize GoogleAuth with specified scopes and client options (for impersonation).
-    const auth = new GoogleAuth({
-      scopes: SCOPES,
-      // SECURITY: Subject (ADMIN_USER) is used for service account impersonation.
-      // This allows the service account to act on behalf of ADMIN_USER.
-      clientOptions: { subject: ADMIN_USER },
-    });
-    return await auth.getClient(); // Returns an authenticated OAuth2 client.
-  } catch (error) {
-    // Log detailed error information for authentication failures.
-    console.error(
-      'Error creating authenticated client:',
-      error.message,
-      error.stack // Include stack trace for better debugging
-    );
-    if (error.response?.data) {
-      // Log response data if available
-      console.error(
-        'Error response data:',
-        JSON.stringify(error.response.data, null, 2)
-      );
-    }
-    // SECURITY: Ensure error messages do not leak overly sensitive details if logged publicly.
-    throw new Error(
-      `Failed to authenticate: ${error.message}. Check service account credentials, permissions, and domain-wide delegation settings.`
-    );
-  }
-}
+export const MAX_CELL_CHARACTERS = 49500; // Max characters for a cell, with some buffer
 
 // --- MAIN LOGIC ---
 // The main function orchestrates the entire audit process.
@@ -767,178 +668,27 @@ async function main() {
 }
 
 // --- CONSTANTS FOR SHEET NAMES ---
-const AUDIT_DETAILS_SHEET_NAME = 'AuditDetails';
-const SUMMARY_SHEET_NAME = 'Summary';
+export const AUDIT_DETAILS_SHEET_NAME = 'AuditDetails';
+export const SUMMARY_SHEET_NAME = 'Summary';
 
-// --- SHEET HELPERS ---
-
-async function clearAndSetHeaders(sheets, spreadsheetId) {
-  try {
-    await callWithRetry(() =>
-      sheets.spreadsheets.values.clear({
-        spreadsheetId,
-        range: AUDIT_DETAILS_SHEET_NAME,
-      })
-    );
-  } catch (e) {
-    if (
-      e.message?.includes('Unable to parse range') ||
-      e.message?.toLowerCase().includes('not found')
-    ) {
-      console.log(`${AUDIT_DETAILS_SHEET_NAME} not found, creating...`);
-      try {
-        await callWithRetry(() =>
-          sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
-            requestBody: {
-              requests: [
-                {
-                  addSheet: {
-                    properties: { title: AUDIT_DETAILS_SHEET_NAME },
-                  },
-                },
-              ],
-            },
-          })
-        );
-        console.log(`${AUDIT_DETAILS_SHEET_NAME} created.`);
-      } catch (addSheetError) {
-        throw addSheetError;
-      }
-    } else {
-      throw e;
-    }
-  }
-
-  const headers = [
-    'Owner Email',
-    'File Name',
-    'File ID',
-    'File Type',
-    'File URL',
-    'Linked Items/References (URLs, Drive IDs)',
-    'GSuite Specific Functions (Sheets only)',
-  ];
-  await callWithRetry(() =>
-    sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${AUDIT_DETAILS_SHEET_NAME}!A1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [headers] },
-    })
-  );
-}
-
-async function appendRows(sheets, spreadsheetId, rows) {
-  if (rows.length === 0) return;
-  await callWithRetry(() =>
-    sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: AUDIT_DETAILS_SHEET_NAME,
-      valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: rows },
-    })
-  );
-}
-
-async function writeSummaryTab(sheets, spreadsheetId, userStats, totalStats) {
-  let sheetExists = false;
-  try {
-    const sp = await callWithRetry(() =>
-      sheets.spreadsheets.get({
-        spreadsheetId,
-        fields: 'sheets.properties.title',
-      })
-    );
-    sheetExists = sp.data.sheets.some(
-      (s) => s.properties.title === SUMMARY_SHEET_NAME
-    );
-  } catch (e) {
-    console.warn(
-      `Could not check for summary sheet existence: ${e.message}. Will attempt to create/clear.`
-    );
-  }
-
-  if (sheetExists) {
-    try {
-      await callWithRetry(() =>
-        sheets.spreadsheets.values.clear({
-          spreadsheetId,
-          range: SUMMARY_SHEET_NAME,
-        })
-      );
-    } catch (e) {
-      console.warn(`Could not clear ${SUMMARY_SHEET_NAME}: ${e.message}.`);
-    }
-  } else {
-    console.log(`Creating summary sheet: ${SUMMARY_SHEET_NAME}`);
-    try {
-      await callWithRetry(() =>
-        sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
-          requestBody: {
-            requests: [
-              { addSheet: { properties: { title: SUMMARY_SHEET_NAME } } },
-            ],
-          },
-        })
-      );
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  const header = [
-    'User Email',
-    'Docs Scanned',
-    'Docs w/ Links',
-    'Sheets Scanned',
-    'Sheets w/ Links',
-    'Sheets w/ Incomp. Funcs',
-    'Slides Scanned',
-    'Slides w/ Links',
-    'Other Files Scanned',
-    'Other Files w/ Links',
-  ];
-  const userRows = Object.entries(userStats).map(([email, stats]) => [
-    email,
-    stats.doc,
-    stats.docWithLinks,
-    stats.sheet,
-    stats.sheetWithLinks,
-    stats.sheetWithIncompatibleFunctions,
-    stats.slide,
-    stats.slideWithLinks,
-    stats.other,
-    stats.otherWithLinks,
-  ]);
-  const totalRow = [
-    'TOTAL',
-    totalStats.doc,
-    totalStats.docWithLinks,
-    totalStats.sheet,
-    totalStats.sheetWithLinks,
-    totalStats.sheetWithIncompatibleFunctions,
-    totalStats.slide,
-    totalStats.slideWithLinks,
-    totalStats.other,
-    totalStats.otherWithLinks,
-  ];
-  const allRows = [header, ...userRows, totalRow];
-
-  await callWithRetry(() =>
-    sheets.spreadsheets.values.update({
-      spreadsheetId,
-      range: `${SUMMARY_SHEET_NAME}!A1`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: allRows },
-    })
-  );
-}
-
-// --- USER & FILE HELPERS ---
-
+/**
+ * Retrieves all active users from Google Workspace admin API
+ *
+ * @async
+ * @param {Object} admin - The Google Admin SDK client instance
+ * @returns {Promise<Array>} A promise that resolves to an array of active user objects
+ *
+ * @description
+ * This function uses pagination to fetch all active users from Google Workspace.
+ * It filters out suspended users, archived users, and users without a primary email.
+ * Each page request fetches up to 500 users.
+ * The function continues fetching pages until all users have been retrieved.
+ *
+ * @example
+ * const adminSdk = require('@googleapis/admin');
+ * const admin = adminSdk.admin('directory_v1');
+ * const users = await getAllUsers(admin);
+ */
 async function getAllUsers(admin) {
   let users = [];
   let pageToken;
@@ -968,6 +718,22 @@ async function getAllUsers(admin) {
   return users;
 }
 
+/**
+ * Retrieves a list of Google Drive files owned by a specific user.
+ *
+ * @async
+ * @function listUserFiles
+ * @param {Object} drive - The Google Drive API client instance.
+ * @param {string} userEmail - The email address of the user whose files to list.
+ * @returns {Promise<Array<Object>>} A promise that resolves to an array of file objects.
+ *   Each file object contains id, name, mimeType, webViewLink, and owners properties.
+ * @description
+ *   This function searches for Google Docs, Sheets, and Slides files that:
+ *   - Are owned by the specified user
+ *   - Are not in the trash
+ *   - Retrieves up to 1000 files per page of results
+ *   - Uses pagination to fetch all matching files
+ */
 async function listUserFiles(drive, userEmail) {
   let files = [];
   let pageToken;
@@ -1000,8 +766,19 @@ async function listUserFiles(drive, userEmail) {
   return files;
 }
 
-// Converts a MIME type string to a more human-readable file type string.
-function getFileType(mimeType) {
+/**
+ * Determines the file type based on its MIME type.
+ *
+ * @param {string|null} mimeType - The MIME type of the file.
+ * @returns {string} A human-readable file type description.
+ *   - 'Google Doc' for Google Documents
+ *   - 'Google Sheet' for Google Spreadsheets
+ *   - 'Google Slide' for Google Presentations
+ *   - 'Google Workspace File' for other Google Workspace files
+ *   - The original MIME type if not a Google Workspace file
+ *   - 'Unknown Type' if no MIME type is provided
+ */
+export function getFileType(mimeType) {
   if (!mimeType) return 'Unknown Type';
   if (mimeType === 'application/vnd.google-apps.document') return 'Google Doc';
   if (mimeType === 'application/vnd.google-apps.spreadsheet')
@@ -1013,149 +790,28 @@ function getFileType(mimeType) {
   return mimeType;
 }
 
-// --- LINK EXTRACTION HELPERS ---
-// These do not interact with APIs directly
-function getDriveFileIdFromUrl(url) {
-  if (typeof url !== 'string') return null;
-  const patterns = [
-    /https?:\/\/docs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings|file)\/d\/([a-zA-Z0-9\-_]{25,})/i,
-    /https?:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9\-_]{25,})/i,
-    /https?:\/\/drive\.google\.com\/open\?id=([a-zA-Z0-9\-_]{25,})/i,
-    /https?:\/\/drive\.google\.com\/drive\/(?:folders|u\/\d+\/folders)\/([a-zA-Z0-9\-_]{25,})/i,
-    /https?:\/\/drive\.google\.com\/drive\/shared-drives\/([a-zA-Z0-9\-_]{15,})/i,
-  ];
-  for (const regex of patterns) {
-    const match = url.match(regex);
-    if (match?.[1]) return match[1];
-  }
-  return null;
-}
-
-// `resolveFileMetadata` makes an API call
-async function resolveFileMetadata(drive, fileId, originalUrl) {
-  try {
-    const file = await callWithRetry(() =>
-      drive.files.get({
-        fileId,
-        fields: 'name,mimeType,webViewLink,teamDriveId,driveId',
-        supportsAllDrives: true,
-      })
-    );
-    return {
-      name: file.data.name || 'Unknown Name',
-      type: getFileType(file.data.mimeType),
-      url: file.data.webViewLink || originalUrl,
-      isSharedDrive: !!(file.data.teamDriveId || file.data.driveId),
-    };
-  } catch (error) {
-    console.warn(
-      `Could not resolve metadata for file ID ${fileId} (URL: ${originalUrl}): ${error.message}`
-    );
-    return null;
-  }
-}
-
-// `processRawUrls` calls `resolveFileMetadata`
-async function processRawUrls(drive, rawUrls) {
-  const uniqueRawUrls = [
-    ...new Set(rawUrls.filter((url) => url && typeof url === 'string')),
-  ];
-  const resolvedLinkInfo = [];
-
-  for (const url of uniqueRawUrls) {
-    const fileId = getDriveFileIdFromUrl(url);
-    if (fileId) {
-      const metadata = await resolveFileMetadata(drive, fileId, url);
-      if (metadata) {
-        resolvedLinkInfo.push(
-          `${url} (Name: ${metadata.name}, Type: ${metadata.type}${
-            metadata.isSharedDrive ? ', Shared Drive' : ''
-          })`
-        );
-      } else {
-        resolvedLinkInfo.push(`${url} (Unresolved Drive Link: ID ${fileId})`);
-      }
-    } else if (url.includes('google.com/') || url.startsWith('/')) {
-      resolvedLinkInfo.push(url);
-    }
-  }
-  return resolvedLinkInfo;
-}
-
-// --- Formula/URL Extractors
-function extractImportrangeIds(formula) {
-  const ids = [];
-  const regex = /IMPORTRANGE\s*\(\s*(?:"([^"]+)"|'([^']+)')\s*,/gi;
-  let match;
-  while ((match = regex.exec(formula)) !== null) {
-    const val = match[1] || match[2];
-    const id = getDriveFileIdFromUrl(val);
-    if (id) {
-      ids.push(`https://docs.google.com/spreadsheets/d/${id}`);
-    } else if (val?.length >= 25 && !val.includes(' ') && !val.includes(',')) {
-      ids.push(`https://docs.google.com/spreadsheets/d/${val}`);
-    }
-  }
-  return ids;
-}
-
-function extractHyperlinkUrls(formula) {
-  const urls = [];
-  const regex = /HYPERLINK\s*\(\s*(?:"([^"]+)"|'([^']+)')/gi;
-  let match;
-  while ((match = regex.exec(formula)) !== null) {
-    urls.push(match[1] || match[2]);
-  }
-  return urls;
-}
-
-function extractImageUrls(formula) {
-  const urls = [];
-  const regex = /IMAGE\s*\(\s*(?:"([^"]+)"|'([^']+)')/gi;
-  let match;
-  while ((match = regex.exec(formula)) !== null) {
-    urls.push(match[1] || match[2]);
-  }
-  return urls;
-}
-
-function extractDriveLinks(text) {
-  if (typeof text !== 'string' || !text) return [];
-  const patterns = [
-    /https?:\/\/docs\.google\.com\/(?:document|spreadsheets|presentation|forms|file|drawings)\/d\/[a-zA-Z0-9\-_]{25,}(?:\/[^#?\s]*)?/gi,
-    /https?:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)[a-zA-Z0-9\-_]{25,}(?:\/[^#?\s]*)?/gi,
-    /https?:\/\/drive\.google\.com\/drive\/(?:folders|u\/\d+\/folders|shared-drives)\/[a-zA-Z0-9\-_]{15,}(?:\/[^#?\s]*)?/gi,
-    /https?:\/\/(?:[a-zA-Z0-9-]+\.)*google\.com\/[^\s"';<>()]+/gi,
-  ];
-  let foundLinks = new Set();
-  for (const regex of patterns) {
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      const potentialLink = match[0].replace(/[;,.)]$/, '');
-      if (
-        getDriveFileIdFromUrl(potentialLink) ||
-        potentialLink.includes('docs.google.com/') ||
-        potentialLink.includes('drive.google.com/')
-      ) {
-        foundLinks.add(potentialLink);
-      }
-    }
-  }
-  return Array.from(foundLinks);
-}
-
-function extractFunctionNamesFromFormula(formula) {
-  if (typeof formula !== 'string') return [];
-  const functionRegex = /\b([A-Z0-9_.]+)\s*\(/gi;
-  const foundFunctions = new Set();
-  let match;
-  while ((match = functionRegex.exec(formula)) !== null) {
-    foundFunctions.add(match[1].toUpperCase());
-  }
-  return Array.from(foundFunctions);
-}
-
 // --- DOCS ---
+/**
+ * Extracts links from a Google Document
+ *
+ * @async
+ * @function findLinksInDoc
+ * @param {Object} docs - The Google Docs API client
+ * @param {Object} drive - The Google Drive API client
+ * @param {string} docId - The ID of the Google Document to extract links from
+ * @returns {Promise<Array>} A processed array of URLs found in the document
+ * @description
+ * This function extracts links from various elements in a Google Document:
+ * - Text with hyperlinks
+ * - URLs mentioned in text content
+ * - Links in embedded object descriptions
+ * - Image content URLs and source URLs
+ * - Links to Google Sheets from embedded charts
+ *
+ * It uses the Google Docs API to retrieve document content with specific fields,
+ * then parses the content to extract all URLs, which are finally processed by
+ * the processRawUrls function.
+ */
 async function findLinksInDoc(docs, drive, docId) {
   const DOC_FIELDS =
     'body(content(paragraph(elements(textRun(content,textStyle.link.url),inlineObjectElement(inlineObjectId))))),inlineObjects';
@@ -1209,6 +865,25 @@ async function findLinksInDoc(docs, drive, docId) {
 }
 
 // --- SHEETS ---
+/**
+ * Extracts links and incompatible formula functions from a Google Spreadsheet
+ *
+ * This function scans through all cells, charts, conditional formats and data validations
+ * in a Google Spreadsheet to find links to other resources (documents, spreadsheets, etc.)
+ * and identifies Google Workspace specific formula functions that may be incompatible with
+ * other spreadsheet applications.
+ *
+ * @async
+ * @param {object} sheets - The Google Sheets API client
+ * @param {object} drive - The Google Drive API client
+ * @param {string} sheetId - The ID of the Google Spreadsheet to analyze
+ *
+ * @returns {Promise<object>} An object containing:
+ *   - links {Array} - Processed links found in the spreadsheet
+ *   - incompatibleFunctions {Array<string>} - Google Workspace specific formula functions used in the spreadsheet
+ *
+ * @throws Will throw an error if the API calls fail beyond retry attempts
+ */
 async function findLinksInSheet(sheets, drive, sheetId) {
   const SPREADSHEET_FIELDS =
     'properties.title,spreadsheetId,sheets(properties(title,sheetType,sheetId),data(rowData(values(userEnteredValue,effectiveValue,formattedValue,hyperlink,textFormatRuns.format.link.uri,dataValidation.condition.values.userEnteredValue))),charts(chartId,spec),conditionalFormats(booleanRule(condition(values(userEnteredValue)))))';
@@ -1296,6 +971,25 @@ async function findLinksInSheet(sheets, drive, sheetId) {
 }
 
 // --- SLIDES ---
+/**
+ * Extracts all links from a Google Slides presentation.
+ *
+ * This function searches through a presentation to find URLs in:
+ * - Text links
+ * - Raw text content that contains links
+ * - Image content and source URLs
+ * - Image hyperlinks
+ * - Video URLs and Drive video links
+ * - Google Sheets chart references
+ * - Both main slide content and speaker notes
+ *
+ * @async
+ * @param {object} slides - Google Slides API client instance
+ * @param {object} drive - Google Drive API client instance
+ * @param {string} slideId - The ID of the Google Slides presentation
+ * @returns {Promise<Array>} A processed array of links found in the presentation
+ * @throws {Error} If the API call fails after retries
+ */
 async function findLinksInSlide(slides, drive, slideId) {
   const SLIDE_FIELDS =
     'presentationId,slides(pageElements,slideProperties.notesPage.pageElements)';
