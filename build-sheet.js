@@ -194,6 +194,9 @@ export async function clearAndSetHeaders(sheets, spreadsheetId) {
   const headers = [
     'Owner Email',
     'File Name',
+    'Created Time',
+    'Modified Time',
+    'File Size',
     'File ID',
     'File Type',
     'File URL',

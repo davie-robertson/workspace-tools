@@ -19,6 +19,7 @@ import {
   truncateItemsForCell,
   writeSummaryTab,
 } from './build-sheet.js';
+import { create } from 'domain';
 
 // --- CLI PARAMS ---
 // Parses command-line arguments provided to the script.
@@ -297,7 +298,7 @@ async function main() {
           fileMetadata = await callWithRetry(() =>
             drive.files.get({
               fileId: singleFileId,
-              fields: 'id, name, mimeType, webViewLink, owners(emailAddress)',
+              fields: 'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
               supportsAllDrives: true,
             })
           );
@@ -514,10 +515,14 @@ async function main() {
             const fileData = {
               ownerEmail: userEmail,
               fileName: file.name,
+              createdTime: file.createdTime,
+              modifiedTime: file.modifiedTime,
+              size: file.size,
               fileId: file.id,
               fileType: fileType,
               fileUrl: file.webViewLink,
               linkedItems: links,
+
             };
             if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
               fileData.incompatibleFunctions = incompatibleFunctions;
@@ -528,6 +533,9 @@ async function main() {
               const row = [
                 userEmail,
                 file.name,
+                file.createdTime,
+                file.modifiedTime,
+                file.size,
                 file.id,
                 fileType,
                 file.webViewLink,
@@ -746,7 +754,7 @@ async function listUserFiles(drive, userEmail) {
     .map((m) => `mimeType = '${m}'`)
     .join(' or ')})`;
   const fields =
-    'nextPageToken, files(id, name, mimeType, webViewLink, owners(emailAddress))';
+    'nextPageToken, files(id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size)';
   const PAGE_SIZE = 1000;
   do {
     const res = await callWithRetry(() =>
