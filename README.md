@@ -1,12 +1,41 @@
 # Google Workspace File Scanner
 
-This Node.js (ESM) project scans all Google Workspace files (Docs, Sheets, Slides) for every user in your domain, counts them, and lists any links they contain to other Workspace files. Results are written directly to a Google Sheet.
+This Node.js (ESM) project is designed for Google Workspace administrators to audit and analyze Google Workspace files (Docs, Sheets, Slides) across their domain. It scans files for links, compatibility issues, and metadata, and outputs results to a Google Sheet or JSON file for further analysis.
 
 ## Features
-- Authenticate with Google Workspace using a service account (domain-wide delegation)
-- Scan all users' Docs, Sheets, and Slides
-- Extract and list links to other Workspace files
-- Output results to a Google Sheet
+- **Comprehensive File Scanning**: Scans Google Docs, Sheets, and Slides for all users in your domain.
+- **Link Extraction**: Identifies and lists links to other Workspace files, including hyperlinks, embedded object links, and formula references.
+- **Google Sheets Compatibility Analysis**: Detects Google Workspace-specific functions in Sheets that may cause compatibility issues with other platforms.
+- **Flexible Output Options**:
+  - **Google Sheets**: Writes results directly to a specified Google Sheet, including a detailed summary tab.
+  - **JSON File**: Outputs results to a JSON file, with options to overwrite or append to existing data.
+- **Batch Processing**: Processes users and files in batches to optimize API usage and avoid quota limits.
+- **Error Handling and Retry Logic**: Implements exponential backoff for API retries and logs detailed error messages for debugging.
+- **CLI Argument Validation**: Ensures correctness of all CLI arguments before execution.
+- **Environment Variable Validation**: Verifies that all required environment variables are set before running the script.
+- **Modular Design**: Organized into reusable modules for API calls, link extraction, and Google Sheets operations.
+
+## Additional Features
+
+### File Metadata Retrieval
+- Retrieves detailed metadata for each file, including:
+  - File ID, name, and MIME type
+  - Web view link for easy access
+  - Owners' email addresses
+  - Creation and modification timestamps
+  - File size (for non-Google Workspace files)
+  - Permissions and sharing status
+
+### JSON Output Enhancements
+- Supports appending new scan results to an existing JSON file, merging statistics and file lists.
+- Includes detailed summaries of:
+  - Total files scanned by type (Docs, Sheets, Slides, etc.)
+  - Files containing links
+  - Google Sheets with incompatible functions
+
+### Debugging and Logging
+- Provides detailed console logs for each step of the process.
+- Warns about skipped files (e.g., the output Google Sheet itself).
 
 ## Prerequisites
 1. **Google Cloud Project**: Create a project in the [Google Cloud Console](https://console.cloud.google.com/).

@@ -13,8 +13,7 @@ npm-debug.log*
 Thumbs.db
 
 # Google Workspace Scanner credentials and sensitive files
-workspace-scanner-credentials.json
-workspace-scanner-*.json
+*.json
 !package.json
 
 # Output

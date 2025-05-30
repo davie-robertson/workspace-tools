@@ -350,6 +350,9 @@ async function main() {
         const fileData = {
           ownerEmail: owner,
           fileName: fileMetadata.data.name,
+          createdTime: fileMetadata.data.createdTime,
+          modifiedTime: fileMetadata.data.modifiedTime,
+          size: fileMetadata.data.size,
           fileId: fileMetadata.data.id,
           fileType: fileType,
           fileUrl: fileMetadata.data.webViewLink,
