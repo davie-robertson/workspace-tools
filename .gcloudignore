@@ -1,0 +1,11 @@
+# filepath: /home/davidr/development/workspace-tools/.gcloudignore
+.git
+node_modules
+.env
+workspace-scanner-credentials.json
+workspace-scanner-*.json
+*.log
+*.csv
+*.xlsx
+.DS_Store
+Thumbs.db

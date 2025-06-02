@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import fs from 'fs'; // For writing JSON output
+import path from 'path';
 import { google } from 'googleapis';
 import {
   callWithRetry,
@@ -20,6 +21,7 @@ import {
   writeSummaryTab,
 } from './build-sheet.js';
 import { create } from 'domain';
+import { Storage } from '@google-cloud/storage';
 
 // --- CLI PARAMS ---
 // Parses command-line arguments provided to the script.
@@ -655,6 +657,13 @@ async function main() {
         );
         console.error(e);
       }
+
+      // If running in a cloud or Docker environment, upload to Google Cloud Storage
+      if (isCloudEnvironment() || isDockerEnvironment()) {
+        const bucketName = process.env.GCS_BUCKET_NAME; // Set this in your environment variables
+        const destination = path.basename(jsonOutputFilePath);
+        await saveToGoogleCloudStorage(bucketName, jsonOutputFilePath, destination);
+      }
     } else if (OUTPUT_SHEET_ID) {
       if (rowsForSheet.length > 0) {
         console.log(
@@ -1062,6 +1071,47 @@ async function findLinksInSlide(slides, drive, slideId) {
   }
 
   return processRawUrls(drive, rawUrls);
+}
+
+// --- FUNCTION TO DETECT ENVIRONMENT ---
+function isCloudEnvironment() {
+  return process.env.GOOGLE_CLOUD_PROJECT || process.env.GCP_ENVIRONMENT === 'true';
+}
+
+function isDockerEnvironment() {
+  return fs.existsSync('/.dockerenv');
+}
+
+// --- FUNCTION TO SAVE TO GOOGLE CLOUD STORAGE ---
+async function saveToGoogleCloudStorage(bucketName, filePath, destination) {
+  const storage = new Storage();
+  try {
+    await storage.bucket(bucketName).upload(filePath, {
+      destination,
+    });
+    console.log(`File ${filePath} uploaded to bucket ${bucketName} as ${destination}`);
+  } catch (error) {
+    console.error('Error uploading file to Google Cloud Storage:', error);
+  }
+}
+
+// --- MAIN FUNCTION TO HANDLE JSON OUTPUT ---
+async function handleJsonOutput(jsonData, outputFilePath) {
+  const bucketName = process.env.GCS_BUCKET_NAME; // Set this in your environment variables
+  const destination = path.basename(outputFilePath);
+
+  // Write JSON to file
+  fs.writeFileSync(outputFilePath, JSON.stringify(jsonData, null, 2));
+  console.log(`JSON file saved locally at ${outputFilePath}`);
+
+  // If running in a cloud or Docker environment, upload to Google Cloud Storage
+  if (isCloudEnvironment() || isDockerEnvironment()) {
+    if (!bucketName) {
+      console.error('GCS_BUCKET_NAME environment variable is not set.');
+      return;
+    }
+    await saveToGoogleCloudStorage(bucketName, outputFilePath, destination);
+  }
 }
 
 // --- SCRIPT EXECUTION ---

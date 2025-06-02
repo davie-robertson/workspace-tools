@@ -102,6 +102,51 @@ This Node.js (ESM) project is designed for Google Workspace administrators to au
      export ADMIN_USER=admin@yourdomain.com
      export OUTPUT_SHEET_ID=your_google_sheet_id
      ```
+## Cloud Environment Setup (Optional)
+If you want to run this script in a cloud environment (e.g., Google Cloud Functions, AWS Lambda), ensure the following:
+- The service account has the necessary permissions and is configured for domain-wide delegation.
+- The environment variables (`GOOGLE_APPLICATION_CREDENTIALS`, `ADMIN_USER`, `OUTPUT_SHEET_ID`) are set in the cloud environment.
+```bash
+gcloud auth login
+gcloud config set project workspace-scanner
+gcloud services enable run.googleapis.com
+gcloud services enable iam.googleapis.com
+gcloud services enable admin.googleapis.com
+gcloud services enable drive.googleapis.com
+gcloud services enable docs.googleapis.com
+gcloud services enable sheets.googleapis.com
+gcloud services enable slides.googleapis.com
+gcloud services enable run.googleapis.com
+gcloud services enable admin.googleapis.com
+gcloud services enable drive.googleapis.com
+gcloud secrets create workspace-scanner-credentials --data-file=workspace-scanner-credentials.json
+```
+```bash
+# Build the Docker image
+gcloud builds submit --tag gcr.io/workspace-scanner/workspace-tools
+```
+```bash
+# Deploy to Cloud Run
+gcloud run deploy workspace-tools \
+    --image gcr.io/workspace-scanner/workspace-tools \
+    --platform managed \
+    --region [REGION] \
+    --allow-unauthenticated \
+    --set-env-vars ADMIN_USER=admin@yourdomain.com,OUTPUT_SHEET_ID=your_google_sheet_id
+```
+```bash
+# Upload the credentials to Secret Manager
+gcloud secrets create workspace-scanner-credentials --data-file=workspace-scanner-credentials.json
+```
+```bash
+# Grant access to the Cloud Run service account
+gcloud secrets add-iam-policy-binding workspace-scanner-credentials \
+    --member="serviceAccount:[SERVICE_ACCOUNT]" \
+    --role="roles/secretmanager.secretAccessor"
+
+gcloud run services update workspace-tools \
+    --update-secrets GOOGLE_APPLICATION_CREDENTIALS=workspace-scanner-credentials:latest
+```
 
 ## How to Run
 1. **Run the audit**
@@ -159,6 +204,72 @@ Examples:
 
 2. **View results**
    - Open your Google Sheet. The script will clear the first sheet and write all results there.
+
+## Saving JSON Output to Google Cloud Storage
+
+This project can detect if it is running in a Google Cloud or Docker environment and automatically save the JSON output to a Google Cloud Storage bucket.
+
+### Prerequisites
+1. **Google Cloud Storage Bucket**: Create a bucket in your Google Cloud project:
+   ```bash
+   gcloud storage buckets create [BUCKET_NAME] --location=[REGION]
+   ```
+   Replace `[BUCKET_NAME]` with your desired bucket name and `[REGION]` with your preferred region (e.g., `us-central1`).
+
+2. **Set Environment Variables**:
+   - `GCS_BUCKET_NAME`: The name of your Google Cloud Storage bucket.
+   - `GCP_ENVIRONMENT`: Set this to `true` if running in a Google Cloud environment.
+
+   Example `.env` file:
+   ```env
+   GOOGLE_APPLICATION_CREDENTIALS=./workspace-scanner-credentials.json
+   ADMIN_USER=admin@yourdomain.com
+   OUTPUT_SHEET_ID=your_google_sheet_id
+   GCS_BUCKET_NAME=your_bucket_name
+   GCP_ENVIRONMENT=true
+   ```
+
+3. **Grant Permissions**:
+   Ensure the service account running the script has the `roles/storage.objectAdmin` role for the bucket:
+   ```bash
+   gcloud projects add-iam-policy-binding [PROJECT_ID] \
+       --member="serviceAccount:[SERVICE_ACCOUNT_EMAIL]" \
+       --role="roles/storage.objectAdmin"
+   ```
+
+   Replace `[PROJECT_ID]` with your Google Cloud project ID and `[SERVICE_ACCOUNT_EMAIL]` with your service account's email.
+
+### How It Works
+- If the script detects it is running in a Google Cloud or Docker environment, it will:
+  1. Save the JSON file locally.
+  2. Upload the JSON file to the specified Google Cloud Storage bucket.
+
+- If the environment is not detected as cloud or Docker, the JSON file will only be saved locally.
+
+### Example Run
+1. Run the script locally:
+   ```bash
+   node index.js
+   ```
+   The JSON file will be saved locally in the `output` directory.
+
+2. Run the script in a Docker container:
+   ```bash
+   docker run -e GCS_BUCKET_NAME=your_bucket_name -v $(pwd)/output:/usr/src/app/output workspace-tools
+   ```
+   The JSON file will be saved locally and uploaded to the specified Google Cloud Storage bucket.
+
+3. Run the script in a Google Cloud environment:
+   ```bash
+   gcloud run deploy workspace-tools \
+       --image gcr.io/[PROJECT_ID]/workspace-tools \
+       --platform managed \
+       --region [REGION] \
+       --allow-unauthenticated \
+       --set-env-vars GCS_BUCKET_NAME=your_bucket_name,ADMIN_USER=admin@yourdomain.com,OUTPUT_SHEET_ID=your_google_sheet_id
+   ```
+
+   The JSON file will be uploaded to the specified Google Cloud Storage bucket.
 
 ## Deployment Notes
 - This script is intended for use by Google Workspace administrators.
