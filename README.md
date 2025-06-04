@@ -37,6 +37,52 @@ This Node.js (ESM) project is designed for Google Workspace administrators to au
 - Provides detailed console logs for each step of the process.
 - Warns about skipped files (e.g., the output Google Sheet itself).
 
+## Data Transfer and Bandwidth Usage
+
+This tool is designed to be **bandwidth-efficient** and does **not download actual files** during scanning. Instead, it uses Google's export APIs to retrieve structured data:
+
+### What Gets Transferred
+- **Google Docs**: Structured JSON containing document text, links, and metadata (via Google Docs API)
+- **Google Sheets**: Cell values, formulas, and formatting data (via Google Sheets API)  
+- **Google Slides**: Slide content, text, and embedded links (via Google Slides API)
+- **File Metadata**: Name, size, permissions, sharing status (via Google Drive API)
+- **User Information**: Email addresses, quota data (via Admin SDK and Gmail API)
+
+### Bandwidth Efficiency
+- **No file downloads**: The tool never downloads .docx, .xlsx, or .pptx files
+- **Small API responses**: Typically 1-10 KB per file (vs. MB for actual files)
+- **Quota information**: Drive and Gmail usage data in minimal JSON format
+- **Structured data only**: Only the content needed for analysis is retrieved
+
+### Data Transfer Monitoring
+The tool includes built-in monitoring that tracks and reports:
+- **Total API calls** made during the scan
+- **Data transferred** (requests sent + responses received) 
+- **Average response size** per API call
+- **Scan duration** and efficiency metrics
+- **Breakdown by service** (Drive, Docs, Sheets, Slides, Admin, Gmail APIs)
+
+Example output from a typical scan:
+```
+DATA TRANSFER REPORT
+============================================================
+Scan Duration: 5.2 seconds
+Total API Calls: 15
+Total Data Transfer: 47.3 KB
+  ↑ Requests Sent: 8.1 KB
+  ↓ Responses Received: 39.2 KB
+Average Response Size: 2.6 KB
+
+API Calls by Service:
+  DRIVE: 8 calls
+  DOCS: 3 calls  
+  SHEETS: 2 calls
+  ADMIN: 1 calls
+  GMAIL: 1 calls
+```
+
+This approach allows the tool to scan hundreds or thousands of files while using only a few MB of bandwidth total, making it suitable for large-scale audits without significant network impact.
+
 ## Prerequisites
 1. **Google Cloud Project**: Create a project in the [Google Cloud Console](https://console.cloud.google.com/).
 2. **Enable APIs**: Enable these APIs for your project:

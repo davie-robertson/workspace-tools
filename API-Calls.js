@@ -2,6 +2,7 @@ import { GoogleAuth } from "google-auth-library";
 import { SCOPES, ADMIN_USER, getFileType } from "./index.js";
 import { getDriveFileIdFromUrl } from "./extract-helpers.js";
 import { google } from "googleapis";
+import { dataTransferMonitor } from './data-transfer-monitor.js';
 
 
 /**
@@ -154,6 +155,10 @@ export async function resolveFileMetadata(drive, fileId, originalUrl) {
       supportsAllDrives: true,
     })
     );
+    
+    // Track file metadata retrieval
+    dataTransferMonitor.trackFileMetadata(fileId, file.data);
+    
     return {
       name: file.data.name || 'Unknown Name',
       type: getFileType(file.data.mimeType),
@@ -339,6 +344,119 @@ export async function getAuthenticatedClientForUser(userEmail) {
     throw new Error(
       `Failed to authenticate as ${userEmail}: ${error.message}. Check service account permissions and domain-wide delegation settings.`
     );
+  }
+}
+
+/**
+ * Gets quota information for a specific user including Drive and Gmail storage
+ *
+ * @async
+ * @param {string} userEmail - The email address of the user to get quota for
+ * @returns {Promise<Object>} An object containing quota information
+ * @throws {Error} If quota retrieval fails
+ *
+ * @example
+ * try {
+ *   const quotaInfo = await getUserQuotaInfo('user@example.com');
+ *   console.log('Drive usage:', quotaInfo.driveUsage);
+ *   console.log('Gmail usage:', quotaInfo.gmailUsage);
+ * } catch (error) {
+ *   console.error("Quota retrieval failed:", error.message);
+ * }
+ */
+export async function getUserQuotaInfo(userEmail) {
+  try {
+    // Create authenticated client for the specific user
+    const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+    const drive = google.drive({ version: 'v3', auth: userAuthClient });
+    const gmail = google.gmail({ version: 'v1', auth: userAuthClient });
+
+    // Get Drive quota information
+    const driveResponse = await callWithRetry(() =>
+      drive.about.get({ fields: 'storageQuota' })
+    );
+
+    // Get Gmail quota information
+    let gmailInfo = null;
+    let gmailResponse = null;
+    try {
+      gmailResponse = await callWithRetry(() =>
+        gmail.users.getProfile({ userId: 'me' })
+      );
+      gmailInfo = {
+        emailAddress: gmailResponse.data.emailAddress,
+        messagesTotal: gmailResponse.data.messagesTotal || 0,
+        threadsTotal: gmailResponse.data.threadsTotal || 0,
+        historyId: gmailResponse.data.historyId || null
+      };
+    } catch (gmailError) {
+      console.warn(`Could not retrieve Gmail info for ${userEmail}: ${gmailError.message}`);
+      gmailInfo = {
+        emailAddress: 'unavailable',
+        messagesTotal: 'unavailable',
+        threadsTotal: 'unavailable', 
+        historyId: 'unavailable',
+        storageUsage: 'unavailable'
+      };
+    }
+
+    const quota = driveResponse.data.storageQuota;
+    
+    // Convert bytes to megabytes (1 MB = 1,048,576 bytes)
+    const bytesToMB = (bytes) => {
+      if (bytes === 'unlimited' || bytes === 'error' || !bytes) return bytes;
+      return (parseInt(bytes) / 1048576).toFixed(2);
+    };
+    
+    const limitMB = quota?.limit ? bytesToMB(quota.limit) : 'unlimited';
+    const usageMB = quota?.usage ? bytesToMB(quota.usage) : '0';
+    const usageInDriveMB = quota?.usageInDrive ? bytesToMB(quota.usageInDrive) : '0';
+    const usageInDriveTrashMB = quota?.usageInDriveTrash ? bytesToMB(quota.usageInDriveTrash) : '0';
+    
+    // Calculate Gmail storage usage: Total usage - Drive usage - Drive trash usage
+    let gmailStorageMB = '0';
+    if (quota?.usage && quota?.usageInDrive && quota?.usageInDriveTrash) {
+      const totalUsage = parseInt(quota.usage);
+      const driveUsage = parseInt(quota.usageInDrive);
+      const trashUsage = parseInt(quota.usageInDriveTrash);
+      const gmailUsageBytes = Math.max(0, totalUsage - driveUsage - trashUsage);
+      gmailStorageMB = bytesToMB(gmailUsageBytes);
+    }
+    
+    // Track quota API calls
+    dataTransferMonitor.trackQuotaCheck(userEmail, driveResponse.data, gmailResponse?.data);
+    
+    return {
+      userEmail,
+      driveQuota: {
+        limit: limitMB,
+        usage: usageMB,
+        usageInDrive: usageInDriveMB,
+        usageInDriveTrash: usageInDriveTrashMB
+      },
+      gmailInfo: {
+        ...gmailInfo,
+        storageUsage: gmailStorageMB
+      }
+    };
+  } catch (error) {
+    console.error(`Error getting quota info for ${userEmail}:`, error.message);
+    return {
+      userEmail,
+      driveQuota: {
+        limit: 'error',
+        usage: 'error', 
+        usageInDrive: 'error',
+        usageInDriveTrash: 'error'
+      },
+      gmailInfo: {
+        emailAddress: 'error',
+        messagesTotal: 'error',
+        threadsTotal: 'error',
+        historyId: 'error',
+        storageUsage: 'error'
+      }
+    };
   }
 }
 

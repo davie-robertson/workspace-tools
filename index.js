@@ -5,6 +5,7 @@ import {
   callWithRetry,
   getAuthenticatedClient,
   getAuthenticatedClientForUser,
+  getUserQuotaInfo,
   processRawUrls,
 } from './API-Calls.js';
 import {
@@ -18,9 +19,11 @@ import {
   appendRows,
   clearAndSetHeaders,
   truncateItemsForCell,
+  writeQuotaTab,
   writeSummaryTab,
 } from './build-sheet.js';
 import { create } from 'domain';
+import { dataTransferMonitor } from './data-transfer-monitor.js';
 
 // --- CLI PARAMS ---
 // Parses command-line arguments provided to the script.
@@ -89,6 +92,41 @@ function validateArgs(argv) {
 
 // Parse the command line arguments
 const argv = parseArgs();
+
+// Check for help argument
+if (argv.help || argv.h) {
+  console.log(`
+Google Workspace Audit Tool
+============================
+
+Usage: node index.js [options]
+
+Options:
+  --users <emails>              Comma-separated list of user emails to scan (optional)
+  --types <types>               Comma-separated list of file types: doc,sheet,slide (optional)
+  --file <fileId>               Scan a single file by its ID (optional)
+  --json-output <path>          Output results to JSON file (optional)
+  --json-output-mode <mode>     JSON output mode: overwrite|append (default: overwrite)
+  --help, -h                    Show this help message
+
+Examples:
+  node index.js                                    # Scan all users and output to Google Sheet
+  node index.js --users alice@domain.com          # Scan specific user
+  node index.js --types sheet,doc                 # Scan only Sheets and Docs
+  node index.js --file 1abc...xyz                 # Scan single file
+  node index.js --json-output ./results.json      # Output to JSON file
+  node index.js --users alice@domain.com --json-output ./alice.json
+
+The tool will collect:
+- File metadata and sharing permissions
+- Drive and Gmail quota information (in MB)
+- External links and incompatible functions
+- Data transfer statistics
+
+Results include both summary statistics and detailed file information.
+`);
+  process.exit(0);
+}
 
 // Validate the parsed arguments
 try {
@@ -162,6 +200,7 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/documents.readonly', // To read Google Docs
   'https://www.googleapis.com/auth/presentations.readonly', // To read Google Slides
   'https://www.googleapis.com/auth/spreadsheets', // Read and Write for output and analysis
+  'https://www.googleapis.com/auth/gmail.readonly', // To read Gmail quota information
 ];
 
 // List of Google Sheets functions considered specific to Google Workspace,
@@ -220,7 +259,7 @@ async function main() {
     // Determine the list of users to scan.
     // If a singleFileId is provided and specific users are filtered, use those users.
     // This allows scanning a specific file in the context of a particular user (e.g., for permissions).
-    if (singleFileId && filterUsers?.length > 0) {
+    if (singleFileId && filterUsers && filterUsers.length > 0) {
       usersToScan = filterUsers.map((email) => ({
         primaryEmail: email.toLowerCase(),
       }));
@@ -242,12 +281,20 @@ async function main() {
         `Found ${allUsers.length} total users. Will scan ${usersToScan.length} users.`
       );
     } else {
-      // For single file scan without specific user filter, use ADMIN_USER as context.
-      // This is important because file access might depend on the user context.
-      usersToScan = [{ primaryEmail: ADMIN_USER.toLowerCase() }];
-      console.log(
-        `No specific user filter for single file scan, using ADMIN_USER (${ADMIN_USER}) context.`
-      );
+      // Single file scan without user filter - need to fetch all users to find file owner
+      const allUsers = await getAllUsers(admin);
+      
+      if (filterUsers && filterUsers.length > 0) {
+        // If specific users are filtered, use only those users
+        usersToScan = filterUsers.map((email) => ({
+          primaryEmail: email
+        }));
+        console.log(`Single file scan with user filter. Will check ${usersToScan.length} users.`);
+      } else {
+        // No user filter specified - need to scan all users to find file owner
+        usersToScan = allUsers ? allUsers.filter((user) => user.primaryEmail) : [];
+        console.log(`Single file scan with no user filter. Will check all ${usersToScan.length} users to find file owner.`);
+      }
     }
 
     // Initialize arrays and objects to store scan results.
@@ -290,24 +337,61 @@ async function main() {
         );
         // Consider if an exit or different handling is needed here. For now, it just skips.
       } else {
-        // Determine user context for the single file scan.
-        // If usersToScan was populated (e.g. by --users), use the first one. Otherwise, default to ADMIN_USER.
-        const contextUserEmail = usersToScan[0]?.primaryEmail || ADMIN_USER;
         console.log(`Fetching metadata for single file ${singleFileId}...`);
         let fileMetadata;
-        try {
-          fileMetadata = await callWithRetry(() =>
-            drive.files.get({
-              fileId: singleFileId,
-              fields: 'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
-              supportsAllDrives: true,
-            })
-          );
-        } catch (e) {
-          console.error(
-            `Failed to fetch metadata for file ${singleFileId}: ${e.message}`
-          );
-          throw e;
+        let contextUserEmail;
+        
+        // Try to find which user owns this file by attempting to access it as each user
+        let foundOwner = false;
+        for (const user of usersToScan) {
+          try {
+            const userAuthClient = await getAuthenticatedClientForUser(user.primaryEmail);
+            const userDrive = google.drive({ version: 'v3', auth: userAuthClient });
+            
+            fileMetadata = await callWithRetry(() =>
+              userDrive.files.get({
+                fileId: singleFileId,
+                fields: 'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
+                supportsAllDrives: true,
+              })
+            );
+            
+            // Track file metadata retrieval
+            dataTransferMonitor.trackFileMetadata(singleFileId, fileMetadata.data);
+            
+            contextUserEmail = user.primaryEmail;
+            foundOwner = true;
+            console.log(`File ${singleFileId} found in ${contextUserEmail}'s accessible files.`);
+            break;
+          } catch (e) {
+            // File not accessible by this user, try next user
+            continue;
+          }
+        }
+        
+        if (!foundOwner) {
+          console.error(`File ${singleFileId} not found or not accessible by any user in the domain.`);
+          throw new Error(`File ${singleFileId} not accessible`);
+        }
+        
+        // Get quota information for the context user
+        console.log(`Getting quota information for ${contextUserEmail}...`);
+        const contextUserQuotaInfo = await getUserQuotaInfo(contextUserEmail);
+        
+        // Initialize userStats for the context user if not already present
+        if (!userStats[contextUserEmail]) {
+          userStats[contextUserEmail] = {
+            doc: 0,
+            sheet: 0,
+            slide: 0,
+            other: 0,
+            docWithLinks: 0,
+            sheetWithLinks: 0,
+            slideWithLinks: 0,
+            otherWithLinks: 0,
+            sheetWithIncompatibleFunctions: 0,
+            quotaInfo: contextUserQuotaInfo,
+          };
         }
 
         let links = [];
@@ -402,6 +486,10 @@ async function main() {
           `User ${userEmail}: Found ${files.length} files. Analyzing...`
         );
 
+        // Get user quota information
+        console.log(`Getting quota information for ${userEmail}...`);
+        const userQuotaInfo = await getUserQuotaInfo(userEmail);
+        
         userStats[userEmail] = {
           doc: 0,
           sheet: 0,
@@ -412,6 +500,7 @@ async function main() {
           slideWithLinks: 0,
           otherWithLinks: 0,
           sheetWithIncompatibleFunctions: 0,
+          quotaInfo: userQuotaInfo,
         };
 
         if (filterTypes) {
@@ -648,6 +737,9 @@ async function main() {
           JSON.stringify(jsonDataToWrite, null, 2)
         );
         console.log(`Audit results written to ${jsonOutputFilePath}`);
+        
+        // Print data transfer report
+        dataTransferMonitor.printReport();
       } catch (e) {
         console.error(
           `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
@@ -664,8 +756,13 @@ async function main() {
       if (!singleFileId) {
         console.log('Writing summary tab to Google Sheet...');
         await writeSummaryTab(sheets, OUTPUT_SHEET_ID, userStats, totalStats);
+        console.log('Writing quota tab to Google Sheet...');
+        await writeQuotaTab(sheets, OUTPUT_SHEET_ID, userStats);
       }
       console.log('Audit complete! Results written to Google Sheet.');
+      
+      // Print data transfer report
+      dataTransferMonitor.printReport();
     } else {
       console.log(
         'No output method specified (JSON or Sheet ID). Results not saved.'
@@ -716,6 +813,10 @@ async function getAllUsers(admin) {
         projection: 'full',
       })
     );
+    
+    // Track this API call
+    dataTransferMonitor.trackUserList(res.data);
+    
     if (res.data.users?.length) {
       users = users.concat(
         res.data.users.filter(

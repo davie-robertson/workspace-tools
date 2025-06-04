@@ -1,5 +1,6 @@
 import { AUDIT_DETAILS_SHEET_NAME, jsonOutputFilePath, MAX_CELL_CHARACTERS, SUMMARY_SHEET_NAME } from "./index.js";
 import { callWithRetry } from "./API-Calls.js";
+import { dataTransferMonitor } from './data-transfer-monitor.js';
 
 
 /**
@@ -116,13 +117,16 @@ export async function writeSummaryTab(sheets, spreadsheetId, userStats, totalSta
   ];
   const allRows = [header, ...userRows, totalRow];
 
-  await callWithRetry(() => sheets.spreadsheets.values.update({
+  const result = await callWithRetry(() => sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${SUMMARY_SHEET_NAME}!A1`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: allRows },
   })
   );
+  
+  // Track sheet write operation
+  dataTransferMonitor.trackSheetWrite(`${SUMMARY_SHEET_NAME}!A1`, allRows);
 }
 /**
  * Appends rows of data to a specified Google Sheet
@@ -276,5 +280,116 @@ export function truncateItemsForCell(
     );
   }
   return truncatedString;
+}
+
+/**
+ * Writes user quota information to a dedicated quota sheet in a Google Spreadsheet.
+ * 
+ * @async
+ * @param {Object} sheets - The Google Sheets API client
+ * @param {string} spreadsheetId - The ID of the Google Spreadsheet
+ * @param {Object.<string, Object>} userStats - Object containing user statistics including quota info
+ * @returns {Promise<void>} A Promise that resolves when the quota sheet has been written
+ * @throws {Error} If there's an error creating or writing to the quota sheet
+ */
+export async function writeQuotaTab(sheets, spreadsheetId, userStats) {
+  const QUOTA_SHEET_NAME = 'UserQuota';
+  
+  // Check if quota sheet exists, create if not
+  let sheetExists = false;
+  try {
+    const sp = await callWithRetry(() => sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties.title',
+    }));
+    sheetExists = sp.data.sheets.some(
+      (s) => s.properties.title === QUOTA_SHEET_NAME
+    );
+  } catch (e) {
+    console.warn(`Could not check for quota sheet existence: ${e.message}`);
+  }
+
+  if (!sheetExists) {
+    try {
+      await callWithRetry(() => sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              addSheet: {
+                properties: { title: QUOTA_SHEET_NAME },
+              },
+            },
+          ],
+        },
+      }));
+      console.log(`${QUOTA_SHEET_NAME} sheet created.`);
+    } catch (addSheetError) {
+      console.error(`Failed to create ${QUOTA_SHEET_NAME} sheet:`, addSheetError.message);
+      return;
+    }
+  } else {
+    // Clear existing content
+    try {
+      await callWithRetry(() => sheets.spreadsheets.values.clear({
+        spreadsheetId,
+        range: QUOTA_SHEET_NAME,
+      }));
+    } catch (e) {
+      console.warn(`Could not clear ${QUOTA_SHEET_NAME} sheet:`, e.message);
+    }
+  }
+
+  // Set headers
+  const headers = [
+    'User Email',
+    'Drive Quota Limit (MB)',
+    'Drive Total Usage (MB)',
+    'Drive Files Usage (MB)', 
+    'Drive Trash Usage (MB)',
+    'Gmail Email Address',
+    'Gmail Messages Total',
+    'Gmail Threads Total',
+    'Gmail History ID',
+    'Gmail Storage Usage (MB)'
+  ];
+
+  // Prepare data rows
+  const rows = [headers];
+  
+  for (const [userEmail, stats] of Object.entries(userStats)) {
+    if (stats.quotaInfo) {
+      const quota = stats.quotaInfo;
+      rows.push([
+        userEmail,
+        quota.driveQuota.limit,
+        quota.driveQuota.usage,
+        quota.driveQuota.usageInDrive,
+        quota.driveQuota.usageInDriveTrash,
+        quota.gmailInfo.emailAddress,
+        quota.gmailInfo.messagesTotal,
+        quota.gmailInfo.threadsTotal,
+        quota.gmailInfo.historyId,
+        quota.gmailInfo.storageUsage
+      ]);
+    }
+  }
+
+  // Write all data at once
+  try {
+    await callWithRetry(() => sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${QUOTA_SHEET_NAME}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: rows },
+    }));
+    
+    // Track sheet write operation
+    dataTransferMonitor.trackSheetWrite(`${QUOTA_SHEET_NAME}!A1`, rows);
+    
+    console.log(`User quota information written to ${QUOTA_SHEET_NAME} sheet.`);
+  } catch (error) {
+    console.error(`Failed to write quota data: ${error.message}`);
+  }
 }
 
