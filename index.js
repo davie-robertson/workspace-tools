@@ -24,6 +24,37 @@ import {
 } from './build-sheet.js';
 import { create } from 'domain';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
+import { streamingLogger, initializeStreamingLogs } from './streaming-logger.js';
+
+// --- CLEANUP FUNCTIONS ---
+/**
+ * Clean up streaming log files after processing is complete
+ */
+function cleanupStreamingLogs() {
+  if (!streamingLogger) return;
+
+  try {
+    const scanLogExists = fs.existsSync(streamingLogger.scanLogPath);
+    const summaryLogExists = fs.existsSync(streamingLogger.summaryLogPath);
+
+    if (scanLogExists) {
+      fs.unlinkSync(streamingLogger.scanLogPath);
+      console.log(`Cleaned up: ${streamingLogger.scanLogPath}`);
+    }
+
+    if (summaryLogExists) {
+      fs.unlinkSync(streamingLogger.summaryLogPath);
+      console.log(`Cleaned up: ${streamingLogger.summaryLogPath}`);
+    }
+
+    if (scanLogExists || summaryLogExists) {
+      console.log('Streaming log files cleaned up successfully.');
+    }
+  } catch (error) {
+    console.warn(`Warning: Failed to clean up streaming log files: ${error.message}`);
+    // Don't throw - cleanup failure shouldn't stop the process
+  }
+}
 
 // --- CLI PARAMS ---
 // Parses command-line arguments provided to the script.
@@ -105,25 +136,33 @@ Options:
   --users <emails>              Comma-separated list of user emails to scan (optional)
   --types <types>               Comma-separated list of file types: doc,sheet,slide (optional)
   --file <fileId>               Scan a single file by its ID (optional)
-  --json-output <path>          Output results to JSON file (optional)
-  --json-output-mode <mode>     JSON output mode: overwrite|append (default: overwrite)
+  --json-output <path>          Export consolidated JSON file (optional - streaming logs are always created)
+  --json-output-mode <mode>     JSON export mode: overwrite|append (default: overwrite)
+  --sheets-output               Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
   --help, -h                    Show this help message
 
 Examples:
-  node index.js                                    # Scan all users and output to Google Sheet
+  node index.js                                    # Scan all users (streaming logs only)
+  node index.js --sheets-output                    # Scan and export to Google Sheets  
   node index.js --users alice@domain.com          # Scan specific user
+  node index.js --json-output ./results.json      # Scan and export consolidated JSON
+  node index.js --sheets-output --json-output ./results.json  # Export to both formats
   node index.js --types sheet,doc                 # Scan only Sheets and Docs
   node index.js --file 1abc...xyz                 # Scan single file
-  node index.js --json-output ./results.json      # Output to JSON file
-  node index.js --users alice@domain.com --json-output ./alice.json
 
-The tool will collect:
+The tool always creates streaming logs (scan-log.jsonl, summary-log.jsonl) during the scan for
+real-time monitoring and data safety. These files are automatically cleaned up after processing.
+
+Output formats:
+- Streaming logs: Always created for real-time monitoring (automatically cleaned up)
+- Google Sheets: Use --sheets-output (requires OUTPUT_SHEET_ID environment variable)  
+- JSON export: Use --json-output <path> for consolidated traditional JSON format
+
+Data collected:
 - File metadata and sharing permissions
 - Drive and Gmail quota information (in MB)
-- External links and incompatible functions
+- External links and incompatible functions (one row per issue in Sheets)
 - Data transfer statistics
-
-Results include both summary statistics and detailed file information.
 `);
   process.exit(0);
 }
@@ -152,13 +191,15 @@ const singleFileId = argv.file;
 export const jsonOutputFilePath = argv['json-output']; // Matches the new argument name
 // Process --json-output-mode argument: 'overwrite' or 'append'.
 const jsonOutputMode = argv['json-output-mode'] || 'overwrite'; // Default to 'overwrite'
+// Process --sheets-output flag: determines if Google Sheets output should be generated
+const sheetsOutput = argv['sheets-output'] || false;
 
 // --- ENVIRONMENT VARIABLES ---
 // SECURITY: ADMIN_USER is critical as it defines the user context for Google Workspace Admin SDK calls.
 // This user MUST have necessary administrative privileges.
 export const ADMIN_USER = process.env.ADMIN_USER;
 // SECURITY: OUTPUT_SHEET_ID is the ID of the Google Sheet where results are written.
-// Ensure this Sheet has appropriate permissions if it contains sensitive audit data.
+// Only required if --sheets-output flag is used.
 const OUTPUT_SHEET_ID = process.env.OUTPUT_SHEET_ID;
 
 // Validate that essential environment variables are set.
@@ -168,10 +209,11 @@ if (!ADMIN_USER) {
   );
   process.exit(1);
 }
-// Ensure at least one output method is configured.
-if (!jsonOutputFilePath && !OUTPUT_SHEET_ID) {
+
+// Validate Google Sheets configuration if requested
+if (sheetsOutput && !OUTPUT_SHEET_ID) {
   console.error(
-    'Missing output configuration: Provide either OUTPUT_SHEET_ID (for Google Sheets output) in .env or --json-output <filepath> (for JSON output) via CLI.'
+    'Google Sheets output requested (--sheets-output) but OUTPUT_SHEET_ID environment variable is not set. Please set OUTPUT_SHEET_ID in your .env file or remove the --sheets-output flag.'
   );
   process.exit(1);
 }
@@ -246,6 +288,9 @@ export const MAX_CELL_CHARACTERS = 49500; // Max characters for a cell, with som
 // The main function orchestrates the entire audit process.
 async function main() {
   try {
+    // Initialize streaming logs for the scan
+    initializeStreamingLogs();
+    
     const auth = await getAuthenticatedClient();
     const admin = google.admin({ version: 'directory_v1', auth });
     const drive = google.drive({ version: 'v3', auth });
@@ -450,6 +495,9 @@ async function main() {
         }
         allFilesData.push(fileData);
 
+        // Stream file data for single file scan
+        streamingLogger.logFile(fileData);
+
         if (jsonOutputFilePath) {
           // JSON output handled after main loop.
         } else if (OUTPUT_SHEET_ID) {
@@ -481,6 +529,9 @@ async function main() {
           })`
         );
 
+        // Stream user processing start
+        streamingLogger.logUserStart(userEmail, idx, usersToScan.length);
+
         let files = await listUserFiles(userEmail);
         console.log(
           `User ${userEmail}: Found ${files.length} files. Analyzing...`
@@ -489,6 +540,9 @@ async function main() {
         // Get user quota information
         console.log(`Getting quota information for ${userEmail}...`);
         const userQuotaInfo = await getUserQuotaInfo(userEmail);
+        
+        // Stream quota data
+        streamingLogger.logQuota(userEmail, userQuotaInfo);
         
         userStats[userEmail] = {
           doc: 0,
@@ -620,6 +674,9 @@ async function main() {
             }
             allFilesData.push(fileData);
 
+            // Stream file data immediately
+            streamingLogger.logFile(fileData);
+
             if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
               const row = [
                 userEmail,
@@ -638,6 +695,9 @@ async function main() {
           }
         }
 
+        // Log user processing completion
+        streamingLogger.logUserComplete(userEmail, userStats[userEmail]);
+
         if (
           !jsonOutputFilePath &&
           OUTPUT_SHEET_ID &&
@@ -652,19 +712,49 @@ async function main() {
       }
     }
 
+    // Log scan completion
+    const scanEndTime = new Date();
+    const scanDuration = Math.round((scanEndTime - streamingLogger.startTime) / 1000);
+    streamingLogger.logScanComplete(totalStats, userStats, scanDuration);
+
     // --- OUTPUT GENERATION ---
     if (jsonOutputFilePath) {
       console.log(`Preparing JSON output: ${jsonOutputFilePath}`);
-      let jsonDataToWrite = {
-        summary: {
-          totalStats: JSON.parse(JSON.stringify(totalStats)),
-          userStats: JSON.parse(JSON.stringify(userStats)),
-          generationDate: new Date().toISOString(),
-        },
-        files: JSON.parse(JSON.stringify(allFilesData)),
-      };
+      
+      // Check if we should use streaming logs for consolidated JSON (more memory efficient)
+      const useStreamingConsolidation = allFilesData.length > 1000; // Use streaming for large datasets
+      
+      if (useStreamingConsolidation) {
+        console.log('Large dataset detected. Using streaming logs for JSON generation...');
+        try {
+          streamingLogger.generateConsolidatedJSON(jsonOutputFilePath);
+          console.log(`Streaming JSON output written to: ${jsonOutputFilePath}`);
+          
+          // Print log stats
+          const logStats = streamingLogger.getLogStats();
+          console.log(`Log files created:`);
+          console.log(`  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`);
+          console.log(`  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`);
+          
+        } catch (error) {
+          console.error('Failed to generate consolidated JSON from streams. Falling back to memory-based approach.');
+          console.error(error.message);
+          // Fall through to traditional approach
+        }
+      }
+      
+      if (!useStreamingConsolidation || fs.existsSync(jsonOutputFilePath) === false) {
+        // Traditional approach - keep all data in memory
+        let jsonDataToWrite = {
+          summary: {
+            totalStats: JSON.parse(JSON.stringify(totalStats)),
+            userStats: JSON.parse(JSON.stringify(userStats)),
+            generationDate: new Date().toISOString(),
+          },
+          files: JSON.parse(JSON.stringify(allFilesData)),
+        };
 
-      if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
+        if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
         console.log(
           `Attempting to append to existing JSON file: ${jsonOutputFilePath}`
         );
@@ -731,45 +821,65 @@ async function main() {
         );
       }
 
-      try {
-        fs.writeFileSync(
-          jsonOutputFilePath,
-          JSON.stringify(jsonDataToWrite, null, 2)
-        );
-        console.log(`Audit results written to ${jsonOutputFilePath}`);
-        
-        // Print data transfer report
-        dataTransferMonitor.printReport();
-      } catch (e) {
-        console.error(
-          `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
-        );
-        console.error(e);
-      }
-    } else if (OUTPUT_SHEET_ID) {
-      if (rowsForSheet.length > 0) {
-        console.log(
-          `Writing final batch of ${rowsForSheet.length} rows to Google Sheet...`
-        );
-        await appendRows(sheets, OUTPUT_SHEET_ID, rowsForSheet);
-      }
-      if (!singleFileId) {
-        console.log('Writing summary tab to Google Sheet...');
-        await writeSummaryTab(sheets, OUTPUT_SHEET_ID, userStats, totalStats);
-        console.log('Writing quota tab to Google Sheet...');
-        await writeQuotaTab(sheets, OUTPUT_SHEET_ID, userStats);
-      }
-      console.log('Audit complete! Results written to Google Sheet.');
-      
-      // Print data transfer report
-      dataTransferMonitor.printReport();
-    } else {
-      console.log(
-        'No output method specified (JSON or Sheet ID). Results not saved.'
-      );
+        try {
+          fs.writeFileSync(
+            jsonOutputFilePath,
+            JSON.stringify(jsonDataToWrite, null, 2)
+          );
+          console.log(`Audit results written to ${jsonOutputFilePath}`);
+          
+          // Print data transfer report
+          dataTransferMonitor.printReport();
+        } catch (e) {
+          console.error(
+            `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
+          );
+          console.error(e);
+        }
+      } // End of traditional approach block
     }
+
+    // Google Sheets output (if requested)
+    if (sheetsOutput && OUTPUT_SHEET_ID) {
+      console.log('Building Google Sheets from streaming logs...');
+      
+      try {
+        const { buildSheetsFromStreamingLogs } = await import('./build-sheet.js');
+        await buildSheetsFromStreamingLogs(
+          sheets, 
+          OUTPUT_SHEET_ID, 
+          streamingLogger.scanLogPath, 
+          streamingLogger.summaryLogPath
+        );
+        console.log('Audit complete! Issue-based results written to Google Sheet.');
+        
+      } catch (error) {
+        console.error('Failed to build sheets from streaming logs:', error.message);
+        console.error('Google Sheets output failed.');
+      }
+    }
+
+    // Always print data transfer report and log stats
+    dataTransferMonitor.printReport();
+    
+    const logStats = streamingLogger.getLogStats();
+    console.log(`\nStreaming logs created:`);
+    console.log(`  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`);
+    console.log(`  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`);
+    
+    if (!jsonOutputFilePath && !sheetsOutput) {
+      console.log('\nTo export data, use:');
+      console.log('  --json-output <path>     Export consolidated JSON');
+      console.log('  --sheets-output          Export to Google Sheets (requires OUTPUT_SHEET_ID)');
+    }
+
+    // Clean up streaming log files after processing is complete
+    cleanupStreamingLogs();
+    
   } catch (error) {
     console.error('Audit failed:', error);
+    // Clean up streaming logs even on error
+    cleanupStreamingLogs();
     process.exit(1);
   }
 }

@@ -6,9 +6,11 @@ This Node.js (ESM) project is designed for Google Workspace administrators to au
 - **Comprehensive File Scanning**: Scans Google Docs, Sheets, and Slides for all users in your domain.
 - **Link Extraction**: Identifies and lists links to other Workspace files, including hyperlinks, embedded object links, and formula references.
 - **Google Sheets Compatibility Analysis**: Detects Google Workspace-specific functions in Sheets that may cause compatibility issues with other platforms.
+- **Streaming-First Architecture**: Always creates streaming logs during scan for real-time monitoring and data safety.
 - **Flexible Output Options**:
-  - **Google Sheets**: Writes results directly to a specified Google Sheet, including a detailed summary tab.
-  - **JSON File**: Outputs results to a JSON file, with options to overwrite or append to existing data.
+  - **Streaming Logs**: Always created (JSONL format) and automatically cleaned up after processing.
+  - **Google Sheets**: Optional export directly to a specified Google Sheet with detailed tabs.
+  - **JSON File**: Optional consolidated JSON export with overwrite or append modes.
 - **Batch Processing**: Processes users and files in batches to optimize API usage and avoid quota limits.
 - **Error Handling and Retry Logic**: Implements exponential backoff for API retries and logs detailed error messages for debugging.
 - **CLI Argument Validation**: Ensures correctness of all CLI arguments before execution.
@@ -83,6 +85,31 @@ API Calls by Service:
 
 This approach allows the tool to scan hundreds or thousands of files while using only a few MB of bandwidth total, making it suitable for large-scale audits without significant network impact.
 
+### Streaming Output for Large Scans
+
+For large-scale scans (1000+ files), the tool uses a **streaming-first architecture** to prevent memory issues and provide real-time progress visibility:
+
+- **Scan Log** (`scan-log.jsonl`): JSONL format file where each file's data is written immediately after processing
+- **Summary Log** (`summary-log.jsonl`): JSONL format file tracking user progress, quota data, and scan events  
+- **Automatic Cleanup**: Streaming log files are automatically cleaned up after processing is complete
+- **Consolidated JSON**: Optional export generated from streaming logs at the end (use `--json-output`)
+- **Real-time Monitoring**: View progress by watching the log files during long scans
+
+Benefits of streaming approach:
+- ✅ **Memory efficient**: No risk of running out of RAM on large datasets
+- ✅ **Progress visibility**: Monitor scan progress in real-time  
+- ✅ **Data safety**: Partial results preserved if scan is interrupted
+- ✅ **Flexible output**: Can generate traditional JSON or Google Sheets from streaming logs
+- ✅ **Clean filesystem**: Log files automatically cleaned up when processing completes
+
+Example streaming output files:
+```bash
+# Real-time file processing log
+scan-log.jsonl          # Each line = one processed file
+summary-log.jsonl       # Each line = progress/quota/user event
+consolidated-output.json # Final traditional JSON format
+```
+
 ## Prerequisites
 1. **Google Cloud Project**: Create a project in the [Google Cloud Console](https://console.cloud.google.com/).
 2. **Enable APIs**: Enable these APIs for your project:
@@ -153,10 +180,13 @@ This approach allows the tool to scan hundreds or thousands of files while using
 
 ### Basic Usage
 ```bash
-# Run a full scan of all users and output to Google Sheets
+# Run a full scan of all users (streaming logs only)
 npm start
 # or
 node index.js
+
+# Run a full scan and export to Google Sheets  
+node index.js --sheets-output
 
 # Show help and available options
 node index.js --help
@@ -172,39 +202,52 @@ node index.js [options]
 - `--users <emails>` - Comma-separated list of user emails to scan (optional)
 - `--types <types>` - Comma-separated list of file types: doc,sheet,slide (optional)  
 - `--file <fileId>` - Scan a single file by its ID (optional)
-- `--json-output <path>` - Output results to JSON file (optional)
-- `--json-output-mode <mode>` - JSON output mode: overwrite|append (default: overwrite)
+- `--json-output <path>` - Export consolidated JSON file (optional - streaming logs always created)
+- `--json-output-mode <mode>` - JSON export mode: overwrite|append (default: overwrite)
+- `--sheets-output` - Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
 - `--help, -h` - Show help message
+
+**Important Notes:**
+- **Streaming logs are always created** during the scan (`scan-log.jsonl`, `summary-log.jsonl`) for real-time monitoring
+- **Streaming logs are automatically cleaned up** after processing completes
+- **`--json-output` is only needed** if you want a consolidated JSON file in addition to the streaming logs
+- **`--sheets-output` is only needed** if you want to export results to Google Sheets
 
 ### Examples
 
 ```bash
-# Scan all users and output to Google Sheet
+# Scan all users (streaming logs only)
 node index.js
+
+# Scan all users and export to Google Sheets
+node index.js --sheets-output
 
 # Scan specific user only
 node index.js --users alice@domain.com
 
-# Scan multiple users
-node index.js --users alice@domain.com,bob@domain.com
+# Scan multiple users and export to Google Sheets
+node index.js --users alice@domain.com,bob@domain.com --sheets-output
 
 # Scan only specific file types
 node index.js --types sheet,doc
 
-# Scan specific user for only Google Sheets
-node index.js --users alice@domain.com --types sheet
+# Scan specific user for only Google Sheets and export consolidated JSON
+node index.js --users alice@domain.com --types sheet --json-output ./results.json
 
 # Scan a single file by ID
 node index.js --file 1abc...xyz
 
-# Output to JSON file instead of Google Sheets
+# Export consolidated JSON file (in addition to streaming logs)
 node index.js --json-output ./results.json
 
-# Output to JSON and append to existing file
+# Export consolidated JSON and append to existing file
 node index.js --json-output ./results.json --json-output-mode append
 
-# Combine options
-node index.js --users alice@domain.com --types doc,sheet --json-output ./alice-scan.json
+# Export to both Google Sheets and consolidated JSON
+node index.js --sheets-output --json-output ./results.json
+
+# Combine multiple options
+node index.js --users alice@domain.com --types doc,sheet --sheets-output --json-output ./alice-scan.json
 ```
 
 ### What the Tool Collects

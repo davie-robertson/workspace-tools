@@ -1,7 +1,226 @@
 import { AUDIT_DETAILS_SHEET_NAME, jsonOutputFilePath, MAX_CELL_CHARACTERS, SUMMARY_SHEET_NAME } from "./index.js";
 import { callWithRetry } from "./API-Calls.js";
 import { dataTransferMonitor } from './data-transfer-monitor.js';
+import fs from 'fs';
 
+/**
+ * Reads streaming logs and creates issue-focused Google Sheets
+ * One row per issue instead of one row per file
+ */
+export async function buildSheetsFromStreamingLogs(sheets, spreadsheetId, scanLogPath, summaryLogPath) {
+  console.log('Building Google Sheets from streaming logs...');
+  
+  try {
+    // Read and parse streaming logs
+    const fileData = readScanLog(scanLogPath);
+    const summaryData = readSummaryLog(summaryLogPath);
+    
+    // Extract user stats and totals from summary data
+    const { userStats, totalStats } = extractStatsFromSummary(summaryData);
+    
+    // Create issue-focused audit details
+    await writeIssueBasedAuditDetails(sheets, spreadsheetId, fileData);
+    
+    // Create summary tab
+    await writeSummaryTab(sheets, spreadsheetId, userStats, totalStats);
+    
+    // Create quota tab  
+    await writeQuotaTab(sheets, spreadsheetId, userStats);
+    
+    console.log('Google Sheets successfully built from streaming logs');
+    
+  } catch (error) {
+    console.error('Failed to build sheets from streaming logs:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Reads the scan log and returns parsed file data
+ */
+function readScanLog(scanLogPath) {
+  const scanLogContent = fs.readFileSync(scanLogPath, 'utf8');
+  const scanLines = scanLogContent.trim().split('\n').filter(line => line);
+  
+  const files = [];
+  scanLines.forEach(line => {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'file_processed') {
+        files.push(entry.data);
+      }
+    } catch (e) {
+      console.warn('Skipped malformed scan log entry:', e.message);
+    }
+  });
+  
+  return files;
+}
+
+/**
+ * Reads the summary log and returns parsed summary data
+ */
+function readSummaryLog(summaryLogPath) {
+  const summaryLogContent = fs.readFileSync(summaryLogPath, 'utf8');
+  const summaryLines = summaryLogContent.trim().split('\n').filter(line => line);
+  
+  const events = [];
+  summaryLines.forEach(line => {
+    try {
+      const entry = JSON.parse(line);
+      events.push(entry);
+    } catch (e) {
+      console.warn('Skipped malformed summary log entry:', e.message);
+    }
+  });
+  
+  return events;
+}
+
+/**
+ * Extracts user stats and total stats from summary log events
+ */
+function extractStatsFromSummary(summaryData) {
+  const userStats = {};
+  let totalStats = {};
+  
+  summaryData.forEach(event => {
+    if (event.type === 'user_processing_completed') {
+      userStats[event.user] = event.stats;
+    } else if (event.type === 'scan_completed') {
+      totalStats = event.total_stats || {};
+    }
+  });
+  
+  return { userStats, totalStats };
+}
+
+/**
+ * Creates issue-focused audit details with one row per issue
+ */
+async function writeIssueBasedAuditDetails(sheets, spreadsheetId, fileData) {
+  const ISSUE_SHEET_NAME = 'Issues';
+  
+  // Check if sheet exists
+  let sheetExists = false;
+  try {
+    const sp = await callWithRetry(() => sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties.title',
+    }));
+    sheetExists = sp.data.sheets.some(s => s.properties.title === ISSUE_SHEET_NAME);
+  } catch (e) {
+    console.warn('Error checking for existing Issues sheet:', e.message);
+  }
+
+  // Create or clear sheet
+  if (!sheetExists) {
+    await callWithRetry(() => sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      resource: {
+        requests: [{
+          addSheet: {
+            properties: { title: ISSUE_SHEET_NAME }
+          }
+        }]
+      }
+    }));
+    console.log(`Created new sheet: ${ISSUE_SHEET_NAME}`);
+  } else {
+    await callWithRetry(() => sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range: `${ISSUE_SHEET_NAME}!A:Z`
+    }));
+    console.log(`Cleared existing sheet: ${ISSUE_SHEET_NAME}`);
+  }
+
+  // Build issue rows
+  const issueRows = buildIssueRows(fileData);
+  
+  // Write headers and data
+  const headers = [
+    'Issue Type', 'Issue Detail', 'Owner Email', 'File Name', 'File Type', 
+    'File ID', 'File URL', 'Created Time', 'Modified Time', 'File Size'
+  ];
+  
+  const allRows = [headers, ...issueRows];
+  
+  await callWithRetry(() => sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ISSUE_SHEET_NAME}!A1`,
+    valueInputOption: 'RAW',
+    resource: { values: allRows }
+  }));
+  
+  console.log(`Issues sheet created with ${issueRows.length} issue rows`);
+  
+  // Track data transfer
+  dataTransferMonitor.trackSheetWrite(`${ISSUE_SHEET_NAME}!A1`, allRows);
+}
+
+/**
+ * Builds issue-focused rows from file data
+ */
+function buildIssueRows(fileData) {
+  const rows = [];
+  
+  fileData.forEach(file => {
+    // Add row for each external link
+    if (file.linkedItems && file.linkedItems.length > 0) {
+      file.linkedItems.forEach(link => {
+        rows.push([
+          'External Link',
+          link,
+          file.ownerEmail,
+          file.fileName,
+          file.fileType,
+          file.fileId,
+          file.fileUrl,
+          file.createdTime,
+          file.modifiedTime,
+          file.size
+        ]);
+      });
+    }
+    
+    // Add row for each incompatible function
+    if (file.incompatibleFunctions && file.incompatibleFunctions.length > 0) {
+      file.incompatibleFunctions.forEach(func => {
+        rows.push([
+          'Incompatible Function',
+          func,
+          file.ownerEmail,
+          file.fileName,
+          file.fileType,
+          file.fileId,
+          file.fileUrl,
+          file.createdTime,
+          file.modifiedTime,
+          file.size
+        ]);
+      });
+    }
+    
+    // Add row for files with no issues (for completeness)
+    if ((!file.linkedItems || file.linkedItems.length === 0) && 
+        (!file.incompatibleFunctions || file.incompatibleFunctions.length === 0)) {
+      rows.push([
+        'No Issues',
+        'File scanned successfully with no issues found',
+        file.ownerEmail,
+        file.fileName,
+        file.fileType,
+        file.fileId,
+        file.fileUrl,
+        file.createdTime,
+        file.modifiedTime,
+        file.size
+      ]);
+    }
+  });
+  
+  return rows;
+}
 
 /**
  * Writes summary statistics to a dedicated summary sheet in a Google Spreadsheet.
