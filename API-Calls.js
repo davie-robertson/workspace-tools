@@ -1,6 +1,7 @@
 import { GoogleAuth } from "google-auth-library";
 import { SCOPES, ADMIN_USER, getFileType } from "./index.js";
 import { getDriveFileIdFromUrl } from "./extract-helpers.js";
+import { google } from "googleapis";
 
 
 /**
@@ -31,7 +32,12 @@ export async function getAuthenticatedClient() {
       // This allows the service account to act on behalf of ADMIN_USER.
       clientOptions: { subject: ADMIN_USER },
     });
-    return await auth.getClient(); // Returns an authenticated OAuth2 client.
+    const authClient = await auth.getClient(); // Returns an authenticated OAuth2 client
+
+    // Check and log permissions
+    await checkPermissions(authClient);
+
+    return authClient;
   } catch (error) {
     // Log detailed error information for authentication failures.
     console.error(
@@ -50,6 +56,33 @@ export async function getAuthenticatedClient() {
     throw new Error(
       `Failed to authenticate: ${error.message}. Check service account credentials, permissions, and domain-wide delegation settings.`
     );
+  }
+}
+
+/**
+ * Checks and logs the permissions of the authenticated client.
+ * 
+ * @async
+ * @param {OAuth2Client} authClient - The authenticated Google OAuth2 client
+ * @throws {Error} If permission verification fails
+ * 
+ * @example
+ * try {
+ *   const authClient = await getAuthenticatedClient();
+ *   await checkPermissions(authClient);
+ * } catch (error) {
+ *   console.error("Permission check failed:", error.message);
+ * }
+ */
+export async function checkPermissions(authClient) {
+  try {
+    const drive = google.drive({ version: 'v3', auth: authClient });
+    const response = await drive.about.get({ fields: 'user, storageQuota' });
+    console.log('Authenticated User:', response.data.user);
+    console.log('Storage Quota:', response.data.storageQuota);
+  } catch (error) {
+    console.error('Error checking permissions:', error.message);
+    throw new Error('Failed to verify permissions. Ensure the service account has the necessary scopes.');
   }
 }
 
@@ -178,5 +211,134 @@ export async function processRawUrls(drive, rawUrls) {
     }
   }
   return resolvedLinkInfo;
+}
+
+/**
+ * Scans and lists files for a specific user in Google Drive.
+ * 
+ * @async
+ * @param {OAuth2Client} authClient - The authenticated Google OAuth2 client
+ * @param {string} targetUserEmail - The email of the user whose files are to be scanned
+ * @returns {Promise<Object[]>} A promise that resolves to an array of file objects containing:
+ *                              - id: The file ID
+ *                              - name: The file name
+ * @throws {Error} If the file scanning fails
+ * 
+ * @example
+ * try {
+ *   const authClient = await getAuthenticatedClient();
+ *   const files = await scanUserFiles(authClient, 'user@example.com');
+ *   console.log('Files:', files);
+ * } catch (error) {
+ *   console.error('Error:', error.message);
+ * }
+ */
+export async function scanUserFiles(authClient, targetUserEmail) {
+  try {
+    console.log(`Scanning files for user ${targetUserEmail}...`);
+
+    // Log the subject being used for impersonation
+    console.log(`Impersonating user: ${targetUserEmail}`);
+
+    // Force reauthentication by creating a new GoogleAuth instance
+    const userAuth = new GoogleAuth({
+      scopes: SCOPES,
+      clientOptions: { subject: targetUserEmail },
+    });
+    const userAuthClient = await userAuth.getClient();
+
+    const drive = google.drive({ version: 'v3', auth: userAuthClient });
+
+    // Test impersonation with a simple API call
+    const testResponse = await drive.files.list({
+      q: "'me' in owners",
+      fields: 'files(id, name)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    console.log(`Test API call response for ${targetUserEmail}:`, testResponse.data);
+
+    // Verify impersonated user
+    const about = await drive.about.get({ fields: 'user' });
+    console.log('Impersonated User:', about.data.user);
+
+    if (about.data.user.emailAddress !== targetUserEmail) {
+      throw new Error(
+        `Impersonation failed: Expected ${targetUserEmail}, but got ${about.data.user.emailAddress}`
+      );
+    }
+
+    // List files owned by or shared with the user
+    const response = await drive.files.list({
+      q: "'me' in owners",
+      fields: 'files(id, name, owners)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    const files = response.data.files || [];
+    console.log(`User ${targetUserEmail}: Found ${files.length} files.`);
+
+    if (files.length > 0) {
+      files.forEach((file) => {
+        console.log(`File: ${file.name} (ID: ${file.id}, Owners: ${JSON.stringify(file.owners)})`);
+      });
+    } else {
+      console.log(`No files found for user ${targetUserEmail}.`);
+    }
+
+    return files;
+  } catch (error) {
+    console.error(`Error scanning files for user ${targetUserEmail}:`, error.message);
+    console.error('Full error details:', error);
+    throw error;
+  }
+}
+
+/**
+ * Creates an authenticated Google API client for a specific user using service account impersonation.
+ * This is required when accessing files owned by different users in Google Workspace.
+ *
+ * @async
+ * @param {string} userEmail - The email address of the user to impersonate
+ * @returns {Promise<OAuth2Client>} An authenticated OAuth2 client impersonating the specified user
+ * @throws {Error} If authentication fails or the user cannot be impersonated
+ *
+ * @example
+ * try {
+ *   const userAuthClient = await getAuthenticatedClientForUser('alice@example.com');
+ *   // Use userAuthClient to make API calls as alice@example.com
+ * } catch (error) {
+ *   console.error("User impersonation failed:", error.message);
+ * }
+ */
+export async function getAuthenticatedClientForUser(userEmail) {
+  try {
+    // Initialize GoogleAuth with specified scopes and impersonate the target user
+    const auth = new GoogleAuth({
+      scopes: SCOPES,
+      // SECURITY: Subject is set to the target user for impersonation
+      // This allows the service account to act on behalf of the specified user
+      clientOptions: { subject: userEmail },
+    });
+    const authClient = await auth.getClient();
+
+    return authClient;
+  } catch (error) {
+    console.error(
+      `Error creating authenticated client for user ${userEmail}:`,
+      error.message,
+      error.stack
+    );
+    if (error.response?.data) {
+      console.error(
+        'Error response data:',
+        JSON.stringify(error.response.data, null, 2)
+      );
+    }
+    throw new Error(
+      `Failed to authenticate as ${userEmail}: ${error.message}. Check service account permissions and domain-wide delegation settings.`
+    );
+  }
 }
 

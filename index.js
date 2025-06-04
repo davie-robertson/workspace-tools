@@ -4,6 +4,7 @@ import { google } from 'googleapis';
 import {
   callWithRetry,
   getAuthenticatedClient,
+  getAuthenticatedClientForUser,
   processRawUrls,
 } from './API-Calls.js';
 import {
@@ -319,19 +320,18 @@ async function main() {
         try {
           switch (fileMetadata.data.mimeType) {
             case 'application/vnd.google-apps.document':
-              links = await findLinksInDoc(docs, drive, singleFileId);
+              links = await findLinksInDoc(singleFileId, contextUserEmail);
               break;
             case 'application/vnd.google-apps.spreadsheet':
               const sheetData = await findLinksInSheet(
-                sheets,
-                drive,
-                singleFileId
+                singleFileId,
+                contextUserEmail
               );
               links = sheetData.links;
               incompatibleFunctions = sheetData.incompatibleFunctions;
               break;
             case 'application/vnd.google-apps.presentation':
-              links = await findLinksInSlide(slides, drive, singleFileId);
+              links = await findLinksInSlide(singleFileId, contextUserEmail);
               break;
             default:
               console.log(
@@ -397,7 +397,7 @@ async function main() {
           })`
         );
 
-        let files = await listUserFiles(drive, userEmail);
+        let files = await listUserFiles(userEmail);
         console.log(
           `User ${userEmail}: Found ${files.length} files. Analyzing...`
         );
@@ -449,7 +449,7 @@ async function main() {
               totalStats.doc++;
               userStats[userEmail].doc++;
               try {
-                links = await findLinksInDoc(docs, drive, file.id);
+                links = await findLinksInDoc(file.id, userEmail);
               } catch (error) {
                 console.error(
                   `Error scanning Google Doc ${file.name}: ${error.message}`
@@ -462,9 +462,8 @@ async function main() {
               userStats[userEmail].sheet++;
               try {
                 const sheetData = await findLinksInSheet(
-                  sheets,
-                  drive,
-                  file.id
+                  file.id,
+                  userEmail
                 );
                 links = sheetData.links;
                 incompatibleFunctions = sheetData.incompatibleFunctions;
@@ -479,7 +478,7 @@ async function main() {
               totalStats.slide++;
               userStats[userEmail].slide++;
               try {
-                links = await findLinksInSlide(slides, drive, file.id);
+                links = await findLinksInSlide(file.id, userEmail);
               } catch (error) {
                 console.error(
                   `Error scanning Google Slide ${file.name}: ${error.message}`
@@ -734,18 +733,21 @@ async function getAllUsers(admin) {
  *
  * @async
  * @function listUserFiles
- * @param {Object} drive - The Google Drive API client instance.
  * @param {string} userEmail - The email address of the user whose files to list.
  * @returns {Promise<Array<Object>>} A promise that resolves to an array of file objects.
  *   Each file object contains id, name, mimeType, webViewLink, and owners properties.
  * @description
  *   This function searches for Google Docs, Sheets, and Slides files that:
- *   - Are owned by the specified user
+ *   - Are owned by the specified user (by impersonating that user)
  *   - Are not in the trash
  *   - Retrieves up to 1000 files per page of results
  *   - Uses pagination to fetch all matching files
  */
-async function listUserFiles(drive, userEmail) {
+async function listUserFiles(userEmail) {
+  // Create an authenticated client for the specific user
+  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const drive = google.drive({ version: 'v3', auth: userAuthClient });
+  
   let files = [];
   let pageToken;
   const queryMimeTypes = [
@@ -753,7 +755,8 @@ async function listUserFiles(drive, userEmail) {
     'application/vnd.google-apps.spreadsheet',
     'application/vnd.google-apps.presentation',
   ];
-  const q = `'${userEmail}' in owners and trashed = false and (${queryMimeTypes
+  // Simplified query since we're now impersonating the user - just look for files they own
+  const q = `trashed = false and (${queryMimeTypes
     .map((m) => `mimeType = '${m}'`)
     .join(' or ')})`;
   const fields =
@@ -768,7 +771,7 @@ async function listUserFiles(drive, userEmail) {
         pageToken,
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
-        corpora: 'user',
+        corpora: 'allDrives',
       })
     );
     if (res.data.files?.length) files = files.concat(res.data.files);
@@ -807,9 +810,8 @@ export function getFileType(mimeType) {
  *
  * @async
  * @function findLinksInDoc
- * @param {Object} docs - The Google Docs API client
- * @param {Object} drive - The Google Drive API client
  * @param {string} docId - The ID of the Google Document to extract links from
+ * @param {string} userEmail - The email of the user to impersonate for API access
  * @returns {Promise<Array>} A processed array of URLs found in the document
  * @description
  * This function extracts links from various elements in a Google Document:
@@ -819,11 +821,16 @@ export function getFileType(mimeType) {
  * - Image content URLs and source URLs
  * - Links to Google Sheets from embedded charts
  *
- * It uses the Google Docs API to retrieve document content with specific fields,
- * then parses the content to extract all URLs, which are finally processed by
- * the processRawUrls function.
+ * It creates authenticated clients for the specified user and uses the Google Docs API
+ * to retrieve document content with specific fields, then parses the content to extract
+ * all URLs, which are finally processed by the processRawUrls function.
  */
-async function findLinksInDoc(docs, drive, docId) {
+async function findLinksInDoc(docId, userEmail) {
+  // Create authenticated clients for the specific user
+  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const docs = google.docs({ version: 'v1', auth: userAuthClient });
+  const drive = google.drive({ version: 'v3', auth: userAuthClient });
+  
   const DOC_FIELDS =
     'body(content(paragraph(elements(textRun(content,textStyle.link.url),inlineObjectElement(inlineObjectId))))),inlineObjects';
   const res = await callWithRetry(() =>
@@ -885,9 +892,8 @@ async function findLinksInDoc(docs, drive, docId) {
  * other spreadsheet applications.
  *
  * @async
- * @param {object} sheets - The Google Sheets API client
- * @param {object} drive - The Google Drive API client
  * @param {string} sheetId - The ID of the Google Spreadsheet to analyze
+ * @param {string} userEmail - The email of the user to impersonate for API access
  *
  * @returns {Promise<object>} An object containing:
  *   - links {Array} - Processed links found in the spreadsheet
@@ -895,7 +901,11 @@ async function findLinksInDoc(docs, drive, docId) {
  *
  * @throws Will throw an error if the API calls fail beyond retry attempts
  */
-async function findLinksInSheet(sheets, drive, sheetId) {
+async function findLinksInSheet(sheetId, userEmail) {
+  // Create authenticated clients for the specific user
+  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const sheets = google.sheets({ version: 'v4', auth: userAuthClient });
+  const drive = google.drive({ version: 'v3', auth: userAuthClient });
   const SPREADSHEET_FIELDS =
     'properties.title,spreadsheetId,sheets(properties(title,sheetType,sheetId),data(rowData(values(userEnteredValue,effectiveValue,formattedValue,hyperlink,textFormatRuns.format.link.uri,dataValidation.condition.values.userEnteredValue))),charts(chartId,spec),conditionalFormats(booleanRule(condition(values(userEnteredValue)))))';
   const res = await callWithRetry(() =>
@@ -995,13 +1005,16 @@ async function findLinksInSheet(sheets, drive, sheetId) {
  * - Both main slide content and speaker notes
  *
  * @async
- * @param {object} slides - Google Slides API client instance
- * @param {object} drive - Google Drive API client instance
  * @param {string} slideId - The ID of the Google Slides presentation
+ * @param {string} userEmail - The email of the user to impersonate for API access
  * @returns {Promise<Array>} A processed array of links found in the presentation
  * @throws {Error} If the API call fails after retries
  */
-async function findLinksInSlide(slides, drive, slideId) {
+async function findLinksInSlide(slideId, userEmail) {
+  // Create authenticated clients for the specific user
+  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const slides = google.slides({ version: 'v1', auth: userAuthClient });
+  const drive = google.drive({ version: 'v3', auth: userAuthClient });
   const SLIDE_FIELDS =
     'presentationId,slides(pageElements,slideProperties.notesPage.pageElements)';
   const res = await callWithRetry(() =>
