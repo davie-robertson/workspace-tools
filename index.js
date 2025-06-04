@@ -6,164 +6,30 @@ import {
   getAuthenticatedClient,
   getAuthenticatedClientForUser,
   getUserQuotaInfo,
-  processRawUrls,
 } from './API-Calls.js';
 import {
-  extractDriveLinks,
-  extractFunctionNamesFromFormula,
-  extractHyperlinkUrls,
-  extractImageUrls,
-  extractImportrangeIds,
-} from './extract-helpers.js';
-import {
-  appendRows,
-  clearAndSetHeaders,
   truncateItemsForCell,
-  writeQuotaTab,
-  writeSummaryTab,
 } from './build-sheet.js';
-import { create } from 'domain';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
-import { streamingLogger, initializeStreamingLogs } from './streaming-logger.js';
-
-// --- CLEANUP FUNCTIONS ---
-/**
- * Clean up streaming log files after processing is complete
- */
-function cleanupStreamingLogs() {
-  if (!streamingLogger) return;
-
-  try {
-    const scanLogExists = fs.existsSync(streamingLogger.scanLogPath);
-    const summaryLogExists = fs.existsSync(streamingLogger.summaryLogPath);
-
-    if (scanLogExists) {
-      fs.unlinkSync(streamingLogger.scanLogPath);
-      console.log(`Cleaned up: ${streamingLogger.scanLogPath}`);
-    }
-
-    if (summaryLogExists) {
-      fs.unlinkSync(streamingLogger.summaryLogPath);
-      console.log(`Cleaned up: ${streamingLogger.summaryLogPath}`);
-    }
-
-    if (scanLogExists || summaryLogExists) {
-      console.log('Streaming log files cleaned up successfully.');
-    }
-  } catch (error) {
-    console.warn(`Warning: Failed to clean up streaming log files: ${error.message}`);
-    // Don't throw - cleanup failure shouldn't stop the process
-  }
-}
-
-// --- CLI PARAMS ---
-// Parses command-line arguments provided to the script.
-// Supports:
-// --users: Comma-separated list of user emails to filter scans by.
-// --types: Comma-separated list of file types (doc, sheet, slide) to filter scans by.
-// --file: A single file ID to scan, bypassing the multi-user/multi-file scan.
-// --json-output <filepath>: Path to a file where JSON output should be written.
-// --json-output-mode <overwrite|append>: Mode for JSON output if the file exists. Defaults to 'overwrite'.
-function parseArgs() {
-  const args = process.argv.slice(2); // Skip 'node' and script path
-  const result = {};
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith('--')) {
-      const key = args[i].substring(2);
-      // Check if next argument exists and is not another option
-      if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
-        result[key] = args[i + 1];
-        i++; // Skip the value argument
-      } else {
-        result[key] = true; // For boolean flags without explicit values
-      }
-    }
-  }
-  return result;
-}
-
-// Added validation for CLI arguments
-function validateArgs(argv) {
-  if (
-    argv['json-output-mode'] &&
-    !['overwrite', 'append'].includes(argv['json-output-mode'])
-  ) {
-    throw new Error(
-      "Invalid value for '--json-output-mode'. Allowed values are 'overwrite' or 'append'."
-    );
-  }
-
-  if (argv.types) {
-    const validTypes = ['doc', 'sheet', 'slide'];
-    const invalidTypes = argv.types
-      .split(',')
-      .map((t) => t.trim().toLowerCase())
-      .filter((t) => !validTypes.includes(t));
-    if (invalidTypes.length > 0) {
-      throw new Error(
-        `Invalid file types specified in '--types': ${invalidTypes.join(
-          ', '
-        )}. Allowed types are ${validTypes.join(', ')}.`
-      );
-    }
-  }
-
-  if (argv.file && typeof argv.file !== 'string') {
-    throw new Error(
-      "Invalid value for '--file'. It must be a valid file ID string."
-    );
-  }
-
-  if (argv.users && typeof argv.users !== 'string') {
-    throw new Error(
-      "Invalid value for '--users'. It must be a comma-separated string of user emails."
-    );
-  }
-}
+import {
+  streamingLogger,
+  initializeStreamingLogs,
+} from './streaming-logger.js';
+import {
+  findLinksInDoc,
+  findLinksInSheet,
+  findLinksInSlide,
+} from './file-scanners.js';
+import { getAllUsers, listUserFiles } from './user-file-management.js';
+import { getFileType, cleanupStreamingLogs } from './utils.js';
+import { parseArgs, validateArgs, showHelp } from './cli.js';
 
 // Parse the command line arguments
 const argv = parseArgs();
 
 // Check for help argument
 if (argv.help || argv.h) {
-  console.log(`
-Google Workspace Audit Tool
-============================
-
-Usage: node index.js [options]
-
-Options:
-  --users <emails>              Comma-separated list of user emails to scan (optional)
-  --types <types>               Comma-separated list of file types: doc,sheet,slide (optional)
-  --file <fileId>               Scan a single file by its ID (optional)
-  --json-output <path>          Export consolidated JSON file (optional - streaming logs are always created)
-  --json-output-mode <mode>     JSON export mode: overwrite|append (default: overwrite)
-  --sheets-output               Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
-  --help, -h                    Show this help message
-
-Examples:
-  node index.js                                    # Scan all users (streaming logs only)
-  node index.js --sheets-output                    # Scan and export to Google Sheets  
-  node index.js --users alice@domain.com          # Scan specific user
-  node index.js --json-output ./results.json      # Scan and export consolidated JSON
-  node index.js --sheets-output --json-output ./results.json  # Export to both formats
-  node index.js --types sheet,doc                 # Scan only Sheets and Docs
-  node index.js --file 1abc...xyz                 # Scan single file
-
-The tool always creates streaming logs (scan-log.jsonl, summary-log.jsonl) during the scan for
-real-time monitoring and data safety. These files are automatically cleaned up after processing.
-
-Output formats:
-- Streaming logs: Always created for real-time monitoring (automatically cleaned up)
-- Google Sheets: Use --sheets-output (requires OUTPUT_SHEET_ID environment variable)  
-- JSON export: Use --json-output <path> for consolidated traditional JSON format
-
-Data collected:
-- File metadata and sharing permissions
-- Drive and Gmail quota information (in MB)
-- External links and incompatible functions (one row per issue in Sheets)
-- Data transfer statistics
-`);
+  showHelp();
   process.exit(0);
 }
 
@@ -227,70 +93,13 @@ if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
   process.exit(1);
 }
 
-// --- CONSTANTS ---
-// Define the OAuth scopes required by the script.
-// SECURITY: These scopes define the permissions the script requests.
-// Review them to ensure they are the minimum necessary for the script's functionality.
-// - admin.directory.user.readonly: To list users in the domain.
-// - drive.readonly: To read files and their metadata from Google Drive.
-// - documents.readonly: To read content from Google Docs.
-// - presentations.readonly: To read content from Google Slides.
-// - spreadsheets: To read content from Google Sheets and write audit results (if OUTPUT_SHEET_ID is used).
-export const SCOPES = [
-  'https://www.googleapis.com/auth/admin.directory.user.readonly', // To list users
-  'https://www.googleapis.com/auth/drive.readonly', // To list and read files
-  'https://www.googleapis.com/auth/documents.readonly', // To read Google Docs
-  'https://www.googleapis.com/auth/presentations.readonly', // To read Google Slides
-  'https://www.googleapis.com/auth/spreadsheets', // Read and Write for output and analysis
-  'https://www.googleapis.com/auth/gmail.readonly', // To read Gmail quota information
-];
-
-// List of Google Sheets functions considered specific to Google Workspace,
-// which might cause compatibility issues if migrating to other platforms (e.g., Excel).
-const GSUITE_SPECIFIC_FUNCTIONS = [
-  'QUERY',
-  'FILTER',
-  'SORTN',
-  'UNIQUE',
-  'ARRAYFORMULA',
-  'GOOGLEFINANCE',
-  'GOOGLETRANSLATE',
-  'IMPORTHTML',
-  'IMPORTXML',
-  'IMPORTFEED',
-  'IMPORTRANGE', // Particularly important for identifying external data links
-  'SPLIT',
-  'JOIN',
-  'REGEXMATCH',
-  'REGEXEXTRACT',
-  'REGEXREPLACE',
-  'SPARKLINE',
-  'FLATTEN',
-  'CONTINUE',
-  'LAMBDA',
-  'MAP',
-  'REDUCE',
-  'SCAN',
-  'MAKEARRAY',
-  'BYROW',
-  'BYCOL',
-  'DETECTLANGUAGE',
-  'ARRAY_CONSTRAIN',
-  'SORT',
-  'CONCAT',
-].map((f) => f.toUpperCase()); // Standardize to uppercase for case-insensitive comparison.
-
-// Maximum number of characters allowed in a single Google Sheet cell.
-// A buffer is included to prevent errors.
-export const MAX_CELL_CHARACTERS = 49500; // Max characters for a cell, with some buffer
-
 // --- MAIN LOGIC ---
 // The main function orchestrates the entire audit process.
 async function main() {
   try {
     // Initialize streaming logs for the scan
     initializeStreamingLogs();
-    
+
     const auth = await getAuthenticatedClient();
     const admin = google.admin({ version: 'directory_v1', auth });
     const drive = google.drive({ version: 'v3', auth });
@@ -328,23 +137,28 @@ async function main() {
     } else {
       // Single file scan without user filter - need to fetch all users to find file owner
       const allUsers = await getAllUsers(admin);
-      
+
       if (filterUsers && filterUsers.length > 0) {
         // If specific users are filtered, use only those users
         usersToScan = filterUsers.map((email) => ({
-          primaryEmail: email
+          primaryEmail: email,
         }));
-        console.log(`Single file scan with user filter. Will check ${usersToScan.length} users.`);
+        console.log(
+          `Single file scan with user filter. Will check ${usersToScan.length} users.`
+        );
       } else {
         // No user filter specified - need to scan all users to find file owner
-        usersToScan = allUsers ? allUsers.filter((user) => user.primaryEmail) : [];
-        console.log(`Single file scan with no user filter. Will check all ${usersToScan.length} users to find file owner.`);
+        usersToScan = allUsers
+          ? allUsers.filter((user) => user.primaryEmail)
+          : [];
+        console.log(
+          `Single file scan with no user filter. Will check all ${usersToScan.length} users to find file owner.`
+        );
       }
     }
 
     // Initialize arrays and objects to store scan results.
     const allFilesData = []; // Stores detailed data for each file found with links/issues.
-    const rowsForSheet = []; // Stores rows to be written to Google Sheets (if that output is used).
 
     // Initialize statistics objects.
     const userStats = {}; // Per-user statistics.
@@ -361,12 +175,9 @@ async function main() {
       sheetWithIncompatibleFunctions: 0,
     };
 
-    // Prepare output: Clear Google Sheet and set headers, or confirm JSON output path.
-    // This setup is done before starting the main scan loop.
-    if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
-      console.log('Preparing output Google Sheet...');
-      await clearAndSetHeaders(sheets, OUTPUT_SHEET_ID);
-    } else if (jsonOutputFilePath) {
+    // Prepare output: Confirm JSON output path if provided.
+    // Google Sheets will be generated from streaming logs after scanning is complete.
+    if (jsonOutputFilePath) {
       console.log(`JSON output will be written to: ${jsonOutputFilePath}`);
     }
 
@@ -385,44 +196,57 @@ async function main() {
         console.log(`Fetching metadata for single file ${singleFileId}...`);
         let fileMetadata;
         let contextUserEmail;
-        
+
         // Try to find which user owns this file by attempting to access it as each user
         let foundOwner = false;
         for (const user of usersToScan) {
           try {
-            const userAuthClient = await getAuthenticatedClientForUser(user.primaryEmail);
-            const userDrive = google.drive({ version: 'v3', auth: userAuthClient });
-            
+            const userAuthClient = await getAuthenticatedClientForUser(
+              user.primaryEmail
+            );
+            const userDrive = google.drive({
+              version: 'v3',
+              auth: userAuthClient,
+            });
+
             fileMetadata = await callWithRetry(() =>
               userDrive.files.get({
                 fileId: singleFileId,
-                fields: 'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
+                fields:
+                  'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
                 supportsAllDrives: true,
               })
             );
-            
+
             // Track file metadata retrieval
-            dataTransferMonitor.trackFileMetadata(singleFileId, fileMetadata.data);
-            
+            dataTransferMonitor.trackFileMetadata(
+              singleFileId,
+              fileMetadata.data
+            );
+
             contextUserEmail = user.primaryEmail;
             foundOwner = true;
-            console.log(`File ${singleFileId} found in ${contextUserEmail}'s accessible files.`);
+            console.log(
+              `File ${singleFileId} found in ${contextUserEmail}'s accessible files.`
+            );
             break;
           } catch (e) {
             // File not accessible by this user, try next user
             continue;
           }
         }
-        
+
         if (!foundOwner) {
-          console.error(`File ${singleFileId} not found or not accessible by any user in the domain.`);
+          console.error(
+            `File ${singleFileId} not found or not accessible by any user in the domain.`
+          );
           throw new Error(`File ${singleFileId} not accessible`);
         }
-        
+
         // Get quota information for the context user
         console.log(`Getting quota information for ${contextUserEmail}...`);
         const contextUserQuotaInfo = await getUserQuotaInfo(contextUserEmail);
-        
+
         // Initialize userStats for the context user if not already present
         if (!userStats[contextUserEmail]) {
           userStats[contextUserEmail] = {
@@ -510,7 +334,7 @@ async function main() {
             truncateItemsForCell(links),
             truncateItemsForCell(incompatibleFunctions, '; ', true),
           ];
-          rowsForSheet.push(row);
+          // Note: rowsForSheet removed - sheets are now built from streaming logs
         }
         console.log(
           `Single file scan complete for ${fileMetadata.data.name}. Found ${links.length} links/references.` +
@@ -540,10 +364,10 @@ async function main() {
         // Get user quota information
         console.log(`Getting quota information for ${userEmail}...`);
         const userQuotaInfo = await getUserQuotaInfo(userEmail);
-        
+
         // Stream quota data
         streamingLogger.logQuota(userEmail, userQuotaInfo);
-        
+
         userStats[userEmail] = {
           doc: 0,
           sheet: 0,
@@ -604,10 +428,7 @@ async function main() {
               totalStats.sheet++;
               userStats[userEmail].sheet++;
               try {
-                const sheetData = await findLinksInSheet(
-                  file.id,
-                  userEmail
-                );
+                const sheetData = await findLinksInSheet(file.id, userEmail);
                 links = sheetData.links;
                 incompatibleFunctions = sheetData.incompatibleFunctions;
               } catch (error) {
@@ -667,7 +488,6 @@ async function main() {
               fileType: fileType,
               fileUrl: file.webViewLink,
               linkedItems: links,
-
             };
             if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
               fileData.incompatibleFunctions = incompatibleFunctions;
@@ -690,60 +510,62 @@ async function main() {
                 truncateItemsForCell(links),
                 truncateItemsForCell(incompatibleFunctions, '; ', true),
               ];
-              rowsForSheet.push(row);
+              // Note: rowsForSheet removed - sheets are now built from streaming logs
             }
           }
         }
 
         // Log user processing completion
         streamingLogger.logUserComplete(userEmail, userStats[userEmail]);
-
-        if (
-          !jsonOutputFilePath &&
-          OUTPUT_SHEET_ID &&
-          rowsForSheet.length >= 100
-        ) {
-          console.log(
-            `Writing batch of ${rowsForSheet.length} rows to Google Sheet for ${userEmail}...`
-          );
-          await appendRows(sheets, OUTPUT_SHEET_ID, rowsForSheet);
-          rowsForSheet.length = 0;
-        }
       }
     }
 
     // Log scan completion
     const scanEndTime = new Date();
-    const scanDuration = Math.round((scanEndTime - streamingLogger.startTime) / 1000);
+    const scanDuration = Math.round(
+      (scanEndTime - streamingLogger.startTime) / 1000
+    );
     streamingLogger.logScanComplete(totalStats, userStats, scanDuration);
 
     // --- OUTPUT GENERATION ---
     if (jsonOutputFilePath) {
       console.log(`Preparing JSON output: ${jsonOutputFilePath}`);
-      
+
       // Check if we should use streaming logs for consolidated JSON (more memory efficient)
       const useStreamingConsolidation = allFilesData.length > 1000; // Use streaming for large datasets
-      
+
       if (useStreamingConsolidation) {
-        console.log('Large dataset detected. Using streaming logs for JSON generation...');
+        console.log(
+          'Large dataset detected. Using streaming logs for JSON generation...'
+        );
         try {
           streamingLogger.generateConsolidatedJSON(jsonOutputFilePath);
-          console.log(`Streaming JSON output written to: ${jsonOutputFilePath}`);
-          
+          console.log(
+            `Streaming JSON output written to: ${jsonOutputFilePath}`
+          );
+
           // Print log stats
           const logStats = streamingLogger.getLogStats();
           console.log(`Log files created:`);
-          console.log(`  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`);
-          console.log(`  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`);
-          
+          console.log(
+            `  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`
+          );
+          console.log(
+            `  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`
+          );
         } catch (error) {
-          console.error('Failed to generate consolidated JSON from streams. Falling back to memory-based approach.');
+          console.error(
+            'Failed to generate consolidated JSON from streams. Falling back to memory-based approach.'
+          );
           console.error(error.message);
           // Fall through to traditional approach
         }
       }
-      
-      if (!useStreamingConsolidation || fs.existsSync(jsonOutputFilePath) === false) {
+
+      if (
+        !useStreamingConsolidation ||
+        fs.existsSync(jsonOutputFilePath) === false
+      ) {
         // Traditional approach - keep all data in memory
         let jsonDataToWrite = {
           summary: {
@@ -755,71 +577,71 @@ async function main() {
         };
 
         if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
-        console.log(
-          `Attempting to append to existing JSON file: ${jsonOutputFilePath}`
-        );
-        try {
-          const existingJsonString = fs.readFileSync(
-            jsonOutputFilePath,
-            'utf-8'
+          console.log(
+            `Attempting to append to existing JSON file: ${jsonOutputFilePath}`
           );
-          const existingJsonData = JSON.parse(existingJsonString);
-          jsonDataToWrite.files = (existingJsonData.files || []).concat(
-            jsonDataToWrite.files
-          );
-          const newTotalStats = JSON.parse(
-            JSON.stringify(existingJsonData.summary?.totalStats || {})
-          );
-          for (const key in totalStats) {
-            newTotalStats[key] = (newTotalStats[key] || 0) + totalStats[key];
-          }
-          jsonDataToWrite.summary.totalStats = newTotalStats;
-          const newUserStats = JSON.parse(
-            JSON.stringify(existingJsonData.summary?.userStats || {})
-          );
-          for (const userEmail in userStats) {
-            if (!newUserStats[userEmail]) {
-              newUserStats[userEmail] = JSON.parse(
-                JSON.stringify(userStats[userEmail])
-              );
-            } else {
-              for (const key in userStats[userEmail]) {
-                newUserStats[userEmail][key] =
-                  (newUserStats[userEmail][key] || 0) +
-                  userStats[userEmail][key];
+          try {
+            const existingJsonString = fs.readFileSync(
+              jsonOutputFilePath,
+              'utf-8'
+            );
+            const existingJsonData = JSON.parse(existingJsonString);
+            jsonDataToWrite.files = (existingJsonData.files || []).concat(
+              jsonDataToWrite.files
+            );
+            const newTotalStats = JSON.parse(
+              JSON.stringify(existingJsonData.summary?.totalStats || {})
+            );
+            for (const key in totalStats) {
+              newTotalStats[key] = (newTotalStats[key] || 0) + totalStats[key];
+            }
+            jsonDataToWrite.summary.totalStats = newTotalStats;
+            const newUserStats = JSON.parse(
+              JSON.stringify(existingJsonData.summary?.userStats || {})
+            );
+            for (const userEmail in userStats) {
+              if (!newUserStats[userEmail]) {
+                newUserStats[userEmail] = JSON.parse(
+                  JSON.stringify(userStats[userEmail])
+                );
+              } else {
+                for (const key in userStats[userEmail]) {
+                  newUserStats[userEmail][key] =
+                    (newUserStats[userEmail][key] || 0) +
+                    userStats[userEmail][key];
+                }
               }
             }
+            jsonDataToWrite.summary.userStats = newUserStats;
+            jsonDataToWrite.summary.generationDate = new Date().toISOString();
+            console.log(
+              `Successfully prepared data for appending to ${jsonOutputFilePath}.`
+            );
+          } catch (e) {
+            console.error(
+              `Error reading/parsing existing JSON for append: ${e.message}. Will overwrite with current scan data as a fallback.`
+            );
+            jsonDataToWrite = {
+              summary: {
+                totalStats: JSON.parse(JSON.stringify(totalStats)),
+                userStats: JSON.parse(JSON.stringify(userStats)),
+                generationDate: new Date().toISOString(),
+              },
+              files: JSON.parse(JSON.stringify(allFilesData)),
+            };
           }
-          jsonDataToWrite.summary.userStats = newUserStats;
-          jsonDataToWrite.summary.generationDate = new Date().toISOString();
+        } else if (
+          jsonOutputMode === 'append' &&
+          !fs.existsSync(jsonOutputFilePath)
+        ) {
           console.log(
-            `Successfully prepared data for appending to ${jsonOutputFilePath}.`
+            `JSON file ${jsonOutputFilePath} not found. Will create a new file.`
           );
-        } catch (e) {
-          console.error(
-            `Error reading/parsing existing JSON for append: ${e.message}. Will overwrite with current scan data as a fallback.`
+        } else {
+          console.log(
+            `Overwriting or creating new JSON file: ${jsonOutputFilePath}`
           );
-          jsonDataToWrite = {
-            summary: {
-              totalStats: JSON.parse(JSON.stringify(totalStats)),
-              userStats: JSON.parse(JSON.stringify(userStats)),
-              generationDate: new Date().toISOString(),
-            },
-            files: JSON.parse(JSON.stringify(allFilesData)),
-          };
         }
-      } else if (
-        jsonOutputMode === 'append' &&
-        !fs.existsSync(jsonOutputFilePath)
-      ) {
-        console.log(
-          `JSON file ${jsonOutputFilePath} not found. Will create a new file.`
-        );
-      } else {
-        console.log(
-          `Overwriting or creating new JSON file: ${jsonOutputFilePath}`
-        );
-      }
 
         try {
           fs.writeFileSync(
@@ -827,9 +649,6 @@ async function main() {
             JSON.stringify(jsonDataToWrite, null, 2)
           );
           console.log(`Audit results written to ${jsonOutputFilePath}`);
-          
-          // Print data transfer report
-          dataTransferMonitor.printReport();
         } catch (e) {
           console.error(
             `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
@@ -842,450 +661,57 @@ async function main() {
     // Google Sheets output (if requested)
     if (sheetsOutput && OUTPUT_SHEET_ID) {
       console.log('Building Google Sheets from streaming logs...');
-      
+
       try {
-        const { buildSheetsFromStreamingLogs } = await import('./build-sheet.js');
+        const { buildSheetsFromStreamingLogs } = await import(
+          './build-sheet.js'
+        );
         await buildSheetsFromStreamingLogs(
-          sheets, 
-          OUTPUT_SHEET_ID, 
-          streamingLogger.scanLogPath, 
+          sheets,
+          OUTPUT_SHEET_ID,
+          streamingLogger.scanLogPath,
           streamingLogger.summaryLogPath
         );
-        console.log('Audit complete! Issue-based results written to Google Sheet.');
-        
+        console.log(
+          'Audit complete! Issue-based results written to Google Sheet.'
+        );
       } catch (error) {
-        console.error('Failed to build sheets from streaming logs:', error.message);
+        console.error(
+          'Failed to build sheets from streaming logs:',
+          error.message
+        );
         console.error('Google Sheets output failed.');
       }
     }
 
     // Always print data transfer report and log stats
     dataTransferMonitor.printReport();
-    
+
     const logStats = streamingLogger.getLogStats();
     console.log(`\nStreaming logs created:`);
-    console.log(`  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`);
-    console.log(`  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`);
-    
+    console.log(
+      `  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`
+    );
+    console.log(
+      `  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`
+    );
+
     if (!jsonOutputFilePath && !sheetsOutput) {
       console.log('\nTo export data, use:');
       console.log('  --json-output <path>     Export consolidated JSON');
-      console.log('  --sheets-output          Export to Google Sheets (requires OUTPUT_SHEET_ID)');
+      console.log(
+        '  --sheets-output          Export to Google Sheets (requires OUTPUT_SHEET_ID)'
+      );
     }
 
     // Clean up streaming log files after processing is complete
-    cleanupStreamingLogs();
-    
+    cleanupStreamingLogs(streamingLogger);
   } catch (error) {
     console.error('Audit failed:', error);
     // Clean up streaming logs even on error
-    cleanupStreamingLogs();
+    cleanupStreamingLogs(streamingLogger);
     process.exit(1);
   }
-}
-
-// --- CONSTANTS FOR SHEET NAMES ---
-export const AUDIT_DETAILS_SHEET_NAME = 'AuditDetails';
-export const SUMMARY_SHEET_NAME = 'Summary';
-
-/**
- * Retrieves all active users from Google Workspace admin API
- *
- * @async
- * @param {Object} admin - The Google Admin SDK client instance
- * @returns {Promise<Array>} A promise that resolves to an array of active user objects
- *
- * @description
- * This function uses pagination to fetch all active users from Google Workspace.
- * It filters out suspended users, archived users, and users without a primary email.
- * Each page request fetches up to 500 users.
- * The function continues fetching pages until all users have been retrieved.
- *
- * @example
- * const adminSdk = require('@googleapis/admin');
- * const admin = adminSdk.admin('directory_v1');
- * const users = await getAllUsers(admin);
- */
-async function getAllUsers(admin) {
-  let users = [];
-  let pageToken;
-  let pageCount = 0;
-  const MAX_USERS_PER_PAGE = 500;
-  do {
-    pageCount++;
-    const res = await callWithRetry(() =>
-      admin.users.list({
-        customer: 'my_customer',
-        maxResults: MAX_USERS_PER_PAGE,
-        pageToken,
-        orderBy: 'email',
-        query: 'isSuspended=false',
-        projection: 'full',
-      })
-    );
-    
-    // Track this API call
-    dataTransferMonitor.trackUserList(res.data);
-    
-    if (res.data.users?.length) {
-      users = users.concat(
-        res.data.users.filter(
-          (u) => !u.suspended && !u.archived && u.primaryEmail
-        )
-      );
-    }
-    pageToken = res.data.nextPageToken;
-  } while (pageToken);
-  return users;
-}
-
-/**
- * Retrieves a list of Google Drive files owned by a specific user.
- *
- * @async
- * @function listUserFiles
- * @param {string} userEmail - The email address of the user whose files to list.
- * @returns {Promise<Array<Object>>} A promise that resolves to an array of file objects.
- *   Each file object contains id, name, mimeType, webViewLink, and owners properties.
- * @description
- *   This function searches for Google Docs, Sheets, and Slides files that:
- *   - Are owned by the specified user (by impersonating that user)
- *   - Are not in the trash
- *   - Retrieves up to 1000 files per page of results
- *   - Uses pagination to fetch all matching files
- */
-async function listUserFiles(userEmail) {
-  // Create an authenticated client for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
-  const drive = google.drive({ version: 'v3', auth: userAuthClient });
-  
-  let files = [];
-  let pageToken;
-  const queryMimeTypes = [
-    'application/vnd.google-apps.document',
-    'application/vnd.google-apps.spreadsheet',
-    'application/vnd.google-apps.presentation',
-  ];
-  // Simplified query since we're now impersonating the user - just look for files they own
-  const q = `trashed = false and (${queryMimeTypes
-    .map((m) => `mimeType = '${m}'`)
-    .join(' or ')})`;
-  const fields =
-    'nextPageToken, files(id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size)';
-  const PAGE_SIZE = 1000;
-  do {
-    const res = await callWithRetry(() =>
-      drive.files.list({
-        q,
-        fields,
-        pageSize: PAGE_SIZE,
-        pageToken,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        corpora: 'allDrives',
-      })
-    );
-    if (res.data.files?.length) files = files.concat(res.data.files);
-    pageToken = res.data.nextPageToken;
-  } while (pageToken);
-  return files;
-}
-
-/**
- * Determines the file type based on its MIME type.
- *
- * @param {string|null} mimeType - The MIME type of the file.
- * @returns {string} A human-readable file type description.
- *   - 'Google Doc' for Google Documents
- *   - 'Google Sheet' for Google Spreadsheets
- *   - 'Google Slide' for Google Presentations
- *   - 'Google Workspace File' for other Google Workspace files
- *   - The original MIME type if not a Google Workspace file
- *   - 'Unknown Type' if no MIME type is provided
- */
-export function getFileType(mimeType) {
-  if (!mimeType) return 'Unknown Type';
-  if (mimeType === 'application/vnd.google-apps.document') return 'Google Doc';
-  if (mimeType === 'application/vnd.google-apps.spreadsheet')
-    return 'Google Sheet';
-  if (mimeType === 'application/vnd.google-apps.presentation')
-    return 'Google Slide';
-  if (mimeType.startsWith('application/vnd.google-apps'))
-    return 'Google Workspace File';
-  return mimeType;
-}
-
-// --- DOCS ---
-/**
- * Extracts links from a Google Document
- *
- * @async
- * @function findLinksInDoc
- * @param {string} docId - The ID of the Google Document to extract links from
- * @param {string} userEmail - The email of the user to impersonate for API access
- * @returns {Promise<Array>} A processed array of URLs found in the document
- * @description
- * This function extracts links from various elements in a Google Document:
- * - Text with hyperlinks
- * - URLs mentioned in text content
- * - Links in embedded object descriptions
- * - Image content URLs and source URLs
- * - Links to Google Sheets from embedded charts
- *
- * It creates authenticated clients for the specified user and uses the Google Docs API
- * to retrieve document content with specific fields, then parses the content to extract
- * all URLs, which are finally processed by the processRawUrls function.
- */
-async function findLinksInDoc(docId, userEmail) {
-  // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
-  const docs = google.docs({ version: 'v1', auth: userAuthClient });
-  const drive = google.drive({ version: 'v3', auth: userAuthClient });
-  
-  const DOC_FIELDS =
-    'body(content(paragraph(elements(textRun(content,textStyle.link.url),inlineObjectElement(inlineObjectId))))),inlineObjects';
-  const res = await callWithRetry(() =>
-    docs.documents.get({ documentId: docId, fields: DOC_FIELDS })
-  );
-  let rawUrls = [];
-  if (res.data.body?.content) {
-    for (const el of res.data.body.content) {
-      if (el.paragraph?.elements) {
-        for (const elem of el.paragraph.elements) {
-          if (elem.textRun) {
-            if (elem.textRun.textStyle?.link?.url) {
-              rawUrls.push(elem.textRun.textStyle.link.url);
-            }
-            if (elem.textRun.content) {
-              rawUrls.push(...extractDriveLinks(elem.textRun.content));
-            }
-          }
-          if (
-            elem.inlineObjectElement?.inlineObjectId &&
-            res.data.inlineObjects
-          ) {
-            const obj =
-              res.data.inlineObjects[elem.inlineObjectElement.inlineObjectId];
-            if (obj?.inlineObjectProperties?.embeddedObject) {
-              const emb = obj.inlineObjectProperties.embeddedObject;
-              if (emb.description) {
-                rawUrls.push(...extractDriveLinks(emb.description));
-              }
-              if (emb.imageProperties?.contentUrl) {
-                rawUrls.push(emb.imageProperties.contentUrl);
-              }
-              if (emb.imageProperties?.sourceUrl) {
-                rawUrls.push(emb.imageProperties.sourceUrl);
-              }
-              if (
-                emb.linkedContentReference?.sheetsChartReference?.spreadsheetId
-              ) {
-                rawUrls.push(
-                  `https://docs.google.com/spreadsheets/d/${emb.linkedContentReference.sheetsChartReference.spreadsheetId}/`
-                );
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  return processRawUrls(drive, rawUrls);
-}
-
-// --- SHEETS ---
-/**
- * Extracts links and incompatible formula functions from a Google Spreadsheet
- *
- * This function scans through all cells, charts, conditional formats and data validations
- * in a Google Spreadsheet to find links to other resources (documents, spreadsheets, etc.)
- * and identifies Google Workspace specific formula functions that may be incompatible with
- * other spreadsheet applications.
- *
- * @async
- * @param {string} sheetId - The ID of the Google Spreadsheet to analyze
- * @param {string} userEmail - The email of the user to impersonate for API access
- *
- * @returns {Promise<object>} An object containing:
- *   - links {Array} - Processed links found in the spreadsheet
- *   - incompatibleFunctions {Array<string>} - Google Workspace specific formula functions used in the spreadsheet
- *
- * @throws Will throw an error if the API calls fail beyond retry attempts
- */
-async function findLinksInSheet(sheetId, userEmail) {
-  // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
-  const sheets = google.sheets({ version: 'v4', auth: userAuthClient });
-  const drive = google.drive({ version: 'v3', auth: userAuthClient });
-  const SPREADSHEET_FIELDS =
-    'properties.title,spreadsheetId,sheets(properties(title,sheetType,sheetId),data(rowData(values(userEnteredValue,effectiveValue,formattedValue,hyperlink,textFormatRuns.format.link.uri,dataValidation.condition.values.userEnteredValue))),charts(chartId,spec),conditionalFormats(booleanRule(condition(values(userEnteredValue)))))';
-  const res = await callWithRetry(() =>
-    sheets.spreadsheets.get({
-      spreadsheetId: sheetId,
-      fields: SPREADSHEET_FIELDS,
-    })
-  );
-
-  let rawUrls = [];
-  let allFormulaFunctions = new Set();
-
-  if (res.data?.sheets) {
-    for (const sheet of res.data.sheets) {
-      if (sheet.data) {
-        for (const gridData of sheet.data) {
-          if (gridData.rowData) {
-            for (const row of gridData.rowData) {
-              if (row.values) {
-                for (const cell of row.values) {
-                  if (!cell) continue;
-                  const formula =
-                    cell.userEnteredValue?.formulaValue ||
-                    cell.effectiveValue?.formulaValue;
-                  if (formula) {
-                    rawUrls.push(
-                      ...extractImportrangeIds(formula),
-                      ...extractHyperlinkUrls(formula),
-                      ...extractImageUrls(formula),
-                      ...extractDriveLinks(formula)
-                    );
-                    extractFunctionNamesFromFormula(formula).forEach((fn) =>
-                      allFormulaFunctions.add(fn)
-                    );
-                  }
-                  if (cell.hyperlink) rawUrls.push(cell.hyperlink);
-                  cell.textFormatRuns?.forEach((run) => {
-                    if (run.format?.link?.uri) {
-                      rawUrls.push(run.format.link.uri);
-                    }
-                  });
-                  const plainText =
-                    cell.userEnteredValue?.stringValue || cell.formattedValue;
-                  if (plainText) rawUrls.push(...extractDriveLinks(plainText));
-                  cell.dataValidation?.condition?.values?.forEach((v) => {
-                    if (v.userEnteredValue) {
-                      rawUrls.push(...extractDriveLinks(v.userEnteredValue));
-                      extractFunctionNamesFromFormula(
-                        v.userEnteredValue
-                      ).forEach((fn) => allFormulaFunctions.add(fn));
-                    }
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-      sheet.conditionalFormats?.forEach((cf) =>
-        cf.booleanRule?.condition?.values?.forEach((v) => {
-          if (v.userEnteredValue) {
-            rawUrls.push(...extractDriveLinks(v.userEnteredValue));
-            extractFunctionNamesFromFormula(v.userEnteredValue).forEach((fn) =>
-              allFormulaFunctions.add(fn)
-            );
-          }
-        })
-      );
-      sheet.charts?.forEach((chart) => {
-        if (chart.spec?.spreadsheetId) {
-          rawUrls.push(
-            `https://docs.google.com/spreadsheets/d/${chart.spec.spreadsheetId}/`
-          );
-        }
-      });
-    }
-  }
-  const links = await processRawUrls(drive, rawUrls);
-  const incompatibleFunctions = Array.from(allFormulaFunctions).filter((fn) =>
-    GSUITE_SPECIFIC_FUNCTIONS.includes(fn)
-  );
-
-  return { links, incompatibleFunctions };
-}
-
-// --- SLIDES ---
-/**
- * Extracts all links from a Google Slides presentation.
- *
- * This function searches through a presentation to find URLs in:
- * - Text links
- * - Raw text content that contains links
- * - Image content and source URLs
- * - Image hyperlinks
- * - Video URLs and Drive video links
- * - Google Sheets chart references
- * - Both main slide content and speaker notes
- *
- * @async
- * @param {string} slideId - The ID of the Google Slides presentation
- * @param {string} userEmail - The email of the user to impersonate for API access
- * @returns {Promise<Array>} A processed array of links found in the presentation
- * @throws {Error} If the API call fails after retries
- */
-async function findLinksInSlide(slideId, userEmail) {
-  // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
-  const slides = google.slides({ version: 'v1', auth: userAuthClient });
-  const drive = google.drive({ version: 'v3', auth: userAuthClient });
-  const SLIDE_FIELDS =
-    'presentationId,slides(pageElements,slideProperties.notesPage.pageElements)';
-  const res = await callWithRetry(() =>
-    slides.presentations.get({
-      presentationId: slideId,
-      fields: SLIDE_FIELDS,
-    })
-  );
-  let rawUrls = [];
-
-  function processPageElementsForSlides(elements) {
-    // Renamed to avoid conflict if used elsewhere
-    if (!elements) return;
-    for (const el of elements) {
-      el.shape?.text?.textElements?.forEach((te) => {
-        if (te.textRun) {
-          if (te.textRun.style?.link?.url) {
-            rawUrls.push(te.textRun.style.link.url);
-          }
-          if (te.textRun.content) {
-            rawUrls.push(...extractDriveLinks(te.textRun.content));
-          }
-        }
-      });
-      if (el.image) {
-        if (el.image.contentUrl) rawUrls.push(el.image.contentUrl);
-        if (el.image.sourceUrl) rawUrls.push(el.image.sourceUrl);
-        if (el.image.imageProperties?.link?.url) {
-          rawUrls.push(el.image.imageProperties.link.url);
-        }
-      }
-      if (el.video) {
-        if (el.video.url) rawUrls.push(el.video.url);
-        if (el.video.source === 'DRIVE' && el.video.id) {
-          rawUrls.push(`https://drive.google.com/file/d/${el.video.id}/view`);
-        }
-      }
-      if (el.sheetsChart?.spreadsheetId) {
-        rawUrls.push(
-          `https://docs.google.com/spreadsheets/d/${el.sheetsChart.spreadsheetId}/`
-        );
-      }
-      if (el.elementGroup?.children) {
-        processPageElementsForSlides(el.elementGroup.children); // Recursive call
-      }
-    }
-  }
-
-  if (res.data.slides) {
-    for (const slide of res.data.slides) {
-      processPageElementsForSlides(slide.pageElements);
-      if (slide.slideProperties?.notesPage) {
-        processPageElementsForSlides(
-          slide.slideProperties.notesPage.pageElements
-        );
-      }
-    }
-  }
-
-  return processRawUrls(drive, rawUrls);
 }
 
 // --- SCRIPT EXECUTION ---

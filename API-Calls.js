@@ -1,5 +1,7 @@
 import { GoogleAuth } from "google-auth-library";
-import { SCOPES, ADMIN_USER, getFileType } from "./index.js";
+import { SCOPES } from "./constants.js";
+import { ADMIN_USER } from "./index.js";
+import { getFileType } from "./utils.js";
 import { getDriveFileIdFromUrl } from "./extract-helpers.js";
 import { google } from "googleapis";
 import { dataTransferMonitor } from './data-transfer-monitor.js';
@@ -79,8 +81,7 @@ export async function checkPermissions(authClient) {
   try {
     const drive = google.drive({ version: 'v3', auth: authClient });
     const response = await drive.about.get({ fields: 'user, storageQuota' });
-    console.log('Authenticated User:', response.data.user);
-    console.log('Storage Quota:', response.data.storageQuota);
+    // Authentication successful - user info available if needed for debugging
   } catch (error) {
     console.error('Error checking permissions:', error.message);
     throw new Error('Failed to verify permissions. Ensure the service account has the necessary scopes.');
@@ -211,7 +212,8 @@ export async function processRawUrls(drive, rawUrls) {
       } else {
         resolvedLinkInfo.push(`${url} (Unresolved Drive Link: ID ${fileId})`);
       }
-    } else if (url.includes('google.com/') || url.startsWith('/')) {
+    } else if (isGoogleWorkspaceUrl(url)) {
+      // Only include Google Workspace document URLs, not general google.com links
       resolvedLinkInfo.push(url);
     }
   }
@@ -242,9 +244,6 @@ export async function scanUserFiles(authClient, targetUserEmail) {
   try {
     console.log(`Scanning files for user ${targetUserEmail}...`);
 
-    // Log the subject being used for impersonation
-    console.log(`Impersonating user: ${targetUserEmail}`);
-
     // Force reauthentication by creating a new GoogleAuth instance
     const userAuth = new GoogleAuth({
       scopes: SCOPES,
@@ -261,11 +260,9 @@ export async function scanUserFiles(authClient, targetUserEmail) {
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     });
-    console.log(`Test API call response for ${targetUserEmail}:`, testResponse.data);
 
     // Verify impersonated user
     const about = await drive.about.get({ fields: 'user' });
-    console.log('Impersonated User:', about.data.user);
 
     if (about.data.user.emailAddress !== targetUserEmail) {
       throw new Error(
@@ -283,14 +280,6 @@ export async function scanUserFiles(authClient, targetUserEmail) {
 
     const files = response.data.files || [];
     console.log(`User ${targetUserEmail}: Found ${files.length} files.`);
-
-    if (files.length > 0) {
-      files.forEach((file) => {
-        console.log(`File: ${file.name} (ID: ${file.id}, Owners: ${JSON.stringify(file.owners)})`);
-      });
-    } else {
-      console.log(`No files found for user ${targetUserEmail}.`);
-    }
 
     return files;
   } catch (error) {
@@ -458,5 +447,24 @@ export async function getUserQuotaInfo(userEmail) {
       }
     };
   }
+}
+
+/**
+ * Checks if a URL is a Google Workspace file URL (Docs, Sheets, Slides, etc.)
+ * 
+ * @param {string} url - The URL to check
+ * @returns {boolean} True if the URL is a Google Workspace file, false otherwise
+ */
+function isGoogleWorkspaceUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  
+  // Check for Google Workspace document types
+  const workspacePatterns = [
+    /docs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings)/,
+    /drive\.google\.com\/(?:file\/d\/|open\?id=)/,
+    /drive\.google\.com\/drive\/(?:folders|shared-drives)/
+  ];
+  
+  return workspacePatterns.some(pattern => pattern.test(url));
 }
 

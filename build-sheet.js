@@ -1,4 +1,5 @@
-import { AUDIT_DETAILS_SHEET_NAME, jsonOutputFilePath, MAX_CELL_CHARACTERS, SUMMARY_SHEET_NAME } from "./index.js";
+import { MAX_CELL_CHARACTERS, SUMMARY_SHEET_NAME } from "./constants.js";
+import { jsonOutputFilePath } from "./index.js";
 import { callWithRetry } from "./API-Calls.js";
 import { dataTransferMonitor } from './data-transfer-monitor.js';
 import fs from 'fs';
@@ -8,8 +9,6 @@ import fs from 'fs';
  * One row per issue instead of one row per file
  */
 export async function buildSheetsFromStreamingLogs(sheets, spreadsheetId, scanLogPath, summaryLogPath) {
-  console.log('Building Google Sheets from streaming logs...');
-  
   try {
     // Read and parse streaming logs
     const fileData = readScanLog(scanLogPath);
@@ -20,6 +19,9 @@ export async function buildSheetsFromStreamingLogs(sheets, spreadsheetId, scanLo
     
     // Create issue-focused audit details
     await writeIssueBasedAuditDetails(sheets, spreadsheetId, fileData);
+    
+    // Create issue chart
+    await createIssueChart(sheets, spreadsheetId, fileData);
     
     // Create summary tab
     await writeSummaryTab(sheets, spreadsheetId, userStats, totalStats);
@@ -347,93 +349,6 @@ export async function writeSummaryTab(sheets, spreadsheetId, userStats, totalSta
   // Track sheet write operation
   dataTransferMonitor.trackSheetWrite(`${SUMMARY_SHEET_NAME}!A1`, allRows);
 }
-/**
- * Appends rows of data to a specified Google Sheet
- * 
- * @async
- * @function appendRows
- * @param {Object} sheets - The Google Sheets API client
- * @param {string} spreadsheetId - The ID of the Google Sheet to append to
- * @param {Array<Array<*>>} rows - The rows of data to append to the sheet
- * @returns {Promise<void>} - A promise that resolves when the operation is complete
- * @throws {Error} - If the API call fails after retries
- */
-export async function appendRows(sheets, spreadsheetId, rows) {
-  if (rows.length === 0) return;
-  await callWithRetry(() => sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: AUDIT_DETAILS_SHEET_NAME,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: rows },
-  })
-  );
-}
-// --- SHEET HELPERS ---
-/**
- * Clears the audit details sheet and sets up headers. If the sheet doesn't exist, it creates a new one.
- * 
- * @param {object} sheets - The Google Sheets API client instance
- * @param {string} spreadsheetId - The ID of the Google Spreadsheet to modify
- * @returns {Promise<void>} - A promise that resolves when headers are set up
- * @throws {Error} - If sheet creation fails or any other API errors occur
- * 
- * @async
- */
-export async function clearAndSetHeaders(sheets, spreadsheetId) {
-  try {
-    await callWithRetry(() => sheets.spreadsheets.values.clear({
-      spreadsheetId,
-      range: AUDIT_DETAILS_SHEET_NAME,
-    })
-    );
-  } catch (e) {
-    if (e.message?.includes('Unable to parse range') ||
-      e.message?.toLowerCase().includes('not found')) {
-      console.log(`${AUDIT_DETAILS_SHEET_NAME} not found, creating...`);
-      try {
-        await callWithRetry(() => sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
-          requestBody: {
-            requests: [
-              {
-                addSheet: {
-                  properties: { title: AUDIT_DETAILS_SHEET_NAME },
-                },
-              },
-            ],
-          },
-        })
-        );
-        console.log(`${AUDIT_DETAILS_SHEET_NAME} created.`);
-      } catch (addSheetError) {
-        throw addSheetError;
-      }
-    } else {
-      throw e;
-    }
-  }
-
-  const headers = [
-    'Owner Email',
-    'File Name',
-    'Created Time',
-    'Modified Time',
-    'File Size',
-    'File ID',
-    'File Type',
-    'File URL',
-    'Linked Items/References (URLs, Drive IDs)',
-    'GSuite Specific Functions (Sheets only)',
-  ];
-  await callWithRetry(() => sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${AUDIT_DETAILS_SHEET_NAME}!A1`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [headers] },
-  })
-  );
-}
 
 /**
  * Truncates an array of items to fit within a cell's character limit.
@@ -609,6 +524,218 @@ export async function writeQuotaTab(sheets, spreadsheetId, userStats) {
     console.log(`User quota information written to ${QUOTA_SHEET_NAME} sheet.`);
   } catch (error) {
     console.error(`Failed to write quota data: ${error.message}`);
+  }
+}
+
+/**
+ * Creates an Issue Chart sheet with a bar chart showing issue types and their counts
+ * 
+ * @async
+ * @param {Object} sheets - The Google Sheets API client
+ * @param {string} spreadsheetId - The ID of the Google Spreadsheet
+ * @param {Array} fileData - Array of file data from scan logs
+ */
+async function createIssueChart(sheets, spreadsheetId, fileData) {
+  const CHART_SHEET_NAME = 'Issue Chart';
+  const ISSUES_SHEET_NAME = 'Issues';
+  
+  // First, get the Issues sheet ID and determine the data range
+  let issuesSheetId = null;
+  let chartSheetId = null;
+  let issuesDataRowCount = 0;
+  
+  try {
+    const sp = await callWithRetry(() => sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties',
+    }));
+    
+    // Find Issues sheet ID
+    const issuesSheet = sp.data.sheets.find(s => s.properties.title === ISSUES_SHEET_NAME);
+    if (!issuesSheet) {
+      console.error('Issues sheet not found - cannot create chart');
+      return;
+    }
+    issuesSheetId = issuesSheet.properties.sheetId;
+    
+    // Get Issues data to determine the range dynamically
+    const issuesResponse = await callWithRetry(() => sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${ISSUES_SHEET_NAME}!A:A`, // Get just column A to count rows
+    }));
+    issuesDataRowCount = (issuesResponse.data.values || []).length;
+    
+    if (issuesDataRowCount <= 1) {
+      console.log('No issue data found (only header row) - skipping chart creation');
+      return;
+    }
+    
+    // Check if chart sheet exists and create/clear it
+    const existingChartSheet = sp.data.sheets.find(s => s.properties.title === CHART_SHEET_NAME);
+    if (existingChartSheet) {
+      chartSheetId = existingChartSheet.properties.sheetId;
+      
+      // Get and delete any existing charts in this sheet
+      try {
+        const sheetWithCharts = await callWithRetry(() => sheets.spreadsheets.get({
+          spreadsheetId,
+          fields: 'sheets(properties.sheetId,charts.chartId)',
+        }));
+        
+        const chartSheet = sheetWithCharts.data.sheets.find(s => s.properties && s.properties.sheetId === chartSheetId);
+        if (chartSheet && chartSheet.charts && chartSheet.charts.length > 0) {
+          const deleteRequests = chartSheet.charts.map(chart => ({
+            deleteEmbeddedObject: {
+              objectId: chart.chartId
+            }
+          }));
+          
+          await callWithRetry(() => sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: { requests: deleteRequests }
+          }));
+          
+          console.log(`Deleted ${chartSheet.charts.length} existing chart(s) to prevent duplicates`);
+        }
+      } catch (e) {
+        console.warn('Error deleting existing charts:', e.message);
+      }
+      
+      console.log(`Using existing sheet: ${CHART_SHEET_NAME}`);
+    } else {
+      // Create new sheet
+      const response = await callWithRetry(() => sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        resource: {
+          requests: [{
+            addSheet: {
+              properties: { title: CHART_SHEET_NAME }
+            }
+          }]
+        }
+      }));
+      chartSheetId = response.data.replies[0].addSheet.properties.sheetId;
+      console.log(`Created new sheet: ${CHART_SHEET_NAME}`);
+    }
+  } catch (e) {
+    console.warn('Error managing Issue Chart sheet:', e.message);
+    return;
+  }
+
+  // Create pre-aggregated data for the chart
+  let issueCounts = {};
+  try {
+    const issuesResponse = await callWithRetry(() => sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${ISSUES_SHEET_NAME}!A2:A${issuesDataRowCount}`, // Skip header row
+    }));
+    const issueData = issuesResponse.data.values || [];
+    
+    // Count occurrences of each issue type
+    issueData.forEach(row => {
+      if (row && row[0]) {
+        const issueType = row[0];
+        issueCounts[issueType] = (issueCounts[issueType] || 0) + 1;
+      }
+    });
+    
+    // Create aggregated data table in the chart sheet
+    const aggregatedData = [
+      ['Issue Type', 'Count'],
+      ...Object.entries(issueCounts).map(([type, count]) => [type, count])
+    ];
+    
+    await callWithRetry(() => sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${CHART_SHEET_NAME}!A1`,
+      valueInputOption: 'RAW',
+      resource: { values: aggregatedData }
+    }));
+    
+    console.log(`Created aggregated data table with ${Object.keys(issueCounts).length} issue types`);
+    
+  } catch (e) {
+    console.warn('Error creating aggregated data:', e.message);
+    return;
+  }
+
+  // Create chart that references the aggregated data in the chart sheet
+  try {
+    await callWithRetry(() => sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      resource: {
+        requests: [{
+          addChart: {
+            chart: {
+              spec: {
+                title: 'Issues Found by Type',
+                basicChart: {
+                  chartType: 'COLUMN',
+                  legendPosition: 'BOTTOM_LEGEND',
+                  stackedType: 'NOT_STACKED',
+                  axis: [
+                    {
+                      position: 'BOTTOM_AXIS',
+                      title: 'Issue Type'
+                    },
+                    {
+                      position: 'LEFT_AXIS', 
+                      title: 'Count'
+                    }
+                  ],
+                  domains: [{
+                    domain: {
+                      sourceRange: {
+                        sources: [{
+                          sheetId: chartSheetId,
+                          startRowIndex: 1, // Skip header row
+                          endRowIndex: 1 + Object.keys(issueCounts).length,
+                          startColumnIndex: 0, // Column A (Issue Type)
+                          endColumnIndex: 1
+                        }]
+                      }
+                    },
+                    reversed: false
+                  }],
+                  series: [{
+                    series: {
+                      sourceRange: {
+                        sources: [{
+                          sheetId: chartSheetId,
+                          startRowIndex: 1, // Skip header row
+                          endRowIndex: 1 + Object.keys(issueCounts).length,
+                          startColumnIndex: 1, // Column B (Count)
+                          endColumnIndex: 2
+                        }]
+                      }
+                    },
+                    type: 'COLUMN',
+                    targetAxis: 'LEFT_AXIS'
+                  }],
+                  headerCount: 0 // No headers since we're skipping row 1
+                }
+              },
+              position: {
+                overlayPosition: {
+                  anchorCell: {
+                    sheetId: chartSheetId,
+                    rowIndex: 2,
+                    columnIndex: 1
+                  },
+                  widthPixels: 600,
+                  heightPixels: 400
+                }
+              }
+            }
+          }
+        }]
+      }
+    }));
+
+    console.log(`Issue chart created in ${CHART_SHEET_NAME} sheet referencing ${issuesDataRowCount} rows from Issues tab`);
+    
+  } catch (error) {
+    console.error(`Failed to create issue chart: ${error.message}`);
   }
 }
 

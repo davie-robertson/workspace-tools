@@ -63,16 +63,20 @@ export function extractImageUrls(formula) {
 export function extractDriveLinks(text) {
   if (typeof text !== 'string' || !text) return [];
   const patterns = [
-    /https?:\/\/docs\.google\.com\/(?:document|spreadsheets|presentation|forms|file|drawings)\/d\/[a-zA-Z0-9\-_]{25,}(?:\/[^#?\s]*)?/gi,
+    // Google Docs, Sheets, Slides, Forms, Drawings - specific workspace file types
+    /https?:\/\/docs\.google\.com\/(?:document|spreadsheets|presentation|forms|drawings)\/d\/[a-zA-Z0-9\-_]{25,}(?:\/[^#?\s]*)?/gi,
+    // Google Drive file links
     /https?:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=)[a-zA-Z0-9\-_]{25,}(?:\/[^#?\s]*)?/gi,
+    // Google Drive folder links (these are also workspace dependencies)
     /https?:\/\/drive\.google\.com\/drive\/(?:folders|u\/\d+\/folders|shared-drives)\/[a-zA-Z0-9\-_]{15,}(?:\/[^#?\s]*)?/gi,
-    /https?:\/\/(?:[a-zA-Z0-9-]+\.)*google\.com\/[^\s"';<>()]+/gi,
+    // REMOVED: Broad google.com pattern that was catching all Google services
   ];
   let foundLinks = new Set();
   for (const regex of patterns) {
     let match;
     while ((match = regex.exec(text)) !== null) {
       const potentialLink = match[0].replace(/[;,.)]$/, '');
+      // Only include links that are clearly Google Workspace files or Drive items
       if (getDriveFileIdFromUrl(potentialLink) ||
         potentialLink.includes('docs.google.com/') ||
         potentialLink.includes('drive.google.com/')) {
