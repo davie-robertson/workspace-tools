@@ -149,62 +149,75 @@ This approach allows the tool to scan hundreds or thousands of files while using
      export OUTPUT_SHEET_ID=your_google_sheet_id
      ```
 
-## How to Run
-1. **Run the audit**
-   ```bash
-   npm start
-   ```
-   or
-   ```bash
-   node index.js
-   ```
-## Command Line Filtering
+## Usage
 
-You can optionally filter which users and document types are processed, and how JSON output is handled, by passing CLI arguments:
+### Basic Usage
+```bash
+# Run a full scan of all users and output to Google Sheets
+npm start
+# or
+node index.js
 
-```
-node index.js --users user1@domain.com,user2@domain.com --types doc,sheet,slide --json-output <filepath> --json-output-mode append
+# Show help and available options
+node index.js --help
 ```
 
-- `--users` (optional): Comma-separated list of user emails to process. If omitted, all users are processed.
-- `--types` (optional): Comma-separated list of document types to process. Valid values: `doc`, `sheet`, `slide`. If omitted, all types are processed.
-- `--json-output <filepath>` (optional): Specify a file path to output the results in JSON format. If this is provided, Google Sheet output (via `OUTPUT_SHEET_ID`) will be skipped unless `OUTPUT_SHEET_ID` is also set (in which case both outputs may occur, though typically one or the other is used).
-- `--json-output-mode <mode>` (optional, requires `--json-output`): Specifies how to handle the JSON output file if it already exists.
-    - `overwrite` (default): The existing JSON file will be completely replaced with the new scan data.
-    - `append`: New scan data will be added to the existing JSON file.
-        - `files`: The list of scanned files from the new run will be added to the existing list.
-        - `summary.totalStats`: Numerical statistics will be summed up with existing totals.
-        - `summary.userStats`: Statistics for each user will be summed. New users from the current scan will be added.
-        - `summary.generationDate`: Will be updated to the timestamp of the latest scan.
-        - If the specified JSON file for appending doesn't exist, a new file will be created.
-        - If there's an error reading or parsing an existing file during an append operation, the script will default to overwriting the file with the current scan's data and log a warning.
+### Command Line Options
 
-Examples:
+```bash
+node index.js [options]
+```
 
-- Only process two users:
-  ```
-  node index.js --users alice@example.com,bob@example.com
-  ```
-- Only process Google Docs and Slides for all users:
-  ```
-  node index.js --types doc,slide
-  ```
-- Process only Google Sheets for a specific user:
-  ```
-  node index.js --users alice@example.com --types sheet
-  ```
-- Output to a JSON file, overwriting if it exists:
-  ```
-  node index.js --json-output scan_results.json
-  ```
-  (or `node index.js --json-output scan_results.json --json-output-mode overwrite`)
-- Output to a JSON file, appending to it if it exists, creating it if not:
-  ```
-  node index.js --json-output scan_results.json --json-output-mode append
-  ```
+**Available Options:**
+- `--users <emails>` - Comma-separated list of user emails to scan (optional)
+- `--types <types>` - Comma-separated list of file types: doc,sheet,slide (optional)  
+- `--file <fileId>` - Scan a single file by its ID (optional)
+- `--json-output <path>` - Output results to JSON file (optional)
+- `--json-output-mode <mode>` - JSON output mode: overwrite|append (default: overwrite)
+- `--help, -h` - Show help message
 
-2. **View results**
-   - Open your Google Sheet. The script will clear the first sheet and write all results there.
+### Examples
+
+```bash
+# Scan all users and output to Google Sheet
+node index.js
+
+# Scan specific user only
+node index.js --users alice@domain.com
+
+# Scan multiple users
+node index.js --users alice@domain.com,bob@domain.com
+
+# Scan only specific file types
+node index.js --types sheet,doc
+
+# Scan specific user for only Google Sheets
+node index.js --users alice@domain.com --types sheet
+
+# Scan a single file by ID
+node index.js --file 1abc...xyz
+
+# Output to JSON file instead of Google Sheets
+node index.js --json-output ./results.json
+
+# Output to JSON and append to existing file
+node index.js --json-output ./results.json --json-output-mode append
+
+# Combine options
+node index.js --users alice@domain.com --types doc,sheet --json-output ./alice-scan.json
+```
+
+### What the Tool Collects
+- **File metadata and sharing permissions**
+- **Drive and Gmail quota information (in MB)**
+- **External links and incompatible functions**
+- **Data transfer statistics**
+
+Results include both summary statistics and detailed file information.
+
+## Viewing Results
+- **Google Sheets**: Open your configured Google Sheet. The script will create multiple tabs with summary and detailed information.
+- **JSON Files**: Open the generated JSON file to view structured data that can be processed by other tools.
 
 ## Deployment Notes
 - This script is intended for use by Google Workspace administrators.
