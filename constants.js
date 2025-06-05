@@ -27,4 +27,51 @@ export const SCOPES = [
 export const MAX_CELL_CHARACTERS = 49500; // Max characters for a cell, with some buffer
 
 // Sheet names for output
-export const SUMMARY_SHEET_NAME = 'Summary';
+export const SHEET_NAMES = {
+  SUMMARY: 'Summary',
+  ISSUES: 'Issues', 
+  QUOTA: 'UserQuota',
+  CHART: 'Issue Chart'
+};
+
+// Issue types
+export const ISSUE_TYPES = {
+  EXTERNAL_LINK: 'External Link',
+  INCOMPATIBLE_FUNCTION: 'Incompatible Function',
+  NO_ISSUES: 'No Issues'
+};
+
+// Google Workspace file types
+export const WORKSPACE_FILE_TYPES = {
+  DOCUMENT: 'application/vnd.google-apps.document',
+  SPREADSHEET: 'application/vnd.google-apps.spreadsheet', 
+  PRESENTATION: 'application/vnd.google-apps.presentation',
+  FORM: 'application/vnd.google-apps.form',
+  DRAWING: 'application/vnd.google-apps.drawing'
+};
+
+// Chart configuration
+export const CHART_CONFIG = {
+  WIDTH: 600,
+  HEIGHT: 400,
+  POSITION: {
+    ROW: 2,
+    COLUMN: 1
+  }
+};
+
+// API retry configuration
+export const RETRY_CONFIG = {
+  MAX_RETRIES: 3,
+  BASE_DELAY: 1000,
+  MAX_DELAY: 10000
+};
+
+// File scanning limits
+export const SCAN_LIMITS = {
+  MAX_FILES_PER_USER: 1000,
+  MAX_USERS_TO_SCAN: 100
+};
+
+// Legacy - keeping for backward compatibility
+export const SUMMARY_SHEET_NAME = SHEET_NAMES.SUMMARY;

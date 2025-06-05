@@ -7,9 +7,6 @@ import {
   getAuthenticatedClientForUser,
   getUserQuotaInfo,
 } from './API-Calls.js';
-import {
-  truncateItemsForCell,
-} from './build-sheet.js';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
 import {
   streamingLogger,
@@ -325,15 +322,7 @@ async function main() {
         if (jsonOutputFilePath) {
           // JSON output handled after main loop.
         } else if (OUTPUT_SHEET_ID) {
-          const row = [
-            owner,
-            fileMetadata.data.name,
-            fileMetadata.data.id,
-            fileType,
-            fileMetadata.data.webViewLink,
-            truncateItemsForCell(links),
-            truncateItemsForCell(incompatibleFunctions, '; ', true),
-          ];
+          // Legacy row data structure no longer used - sheets built from streaming logs
           // Note: rowsForSheet removed - sheets are now built from streaming logs
         }
         console.log(
@@ -477,41 +466,29 @@ async function main() {
             userStats[userEmail].sheetWithIncompatibleFunctions++;
           }
 
-          if (links.length > 0 || incompatibleFunctions.length > 0) {
-            const fileData = {
-              ownerEmail: userEmail,
-              fileName: file.name,
-              createdTime: file.createdTime,
-              modifiedTime: file.modifiedTime,
-              size: file.size,
-              fileId: file.id,
-              fileType: fileType,
-              fileUrl: file.webViewLink,
-              linkedItems: links,
-            };
-            if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
-              fileData.incompatibleFunctions = incompatibleFunctions;
-            }
-            allFilesData.push(fileData);
+          // Create file data for all scanned files
+          const fileData = {
+            ownerEmail: userEmail,
+            fileName: file.name,
+            createdTime: file.createdTime,
+            modifiedTime: file.modifiedTime,
+            size: file.size,
+            fileId: file.id,
+            fileType: fileType,
+            fileUrl: file.webViewLink,
+            linkedItems: links,
+          };
+          if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+            fileData.incompatibleFunctions = incompatibleFunctions;
+          }
+          allFilesData.push(fileData);
 
-            // Stream file data immediately
-            streamingLogger.logFile(fileData);
+          // Stream file data immediately (for all files, not just those with issues)
+          streamingLogger.logFile(fileData);
 
-            if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
-              const row = [
-                userEmail,
-                file.name,
-                file.createdTime,
-                file.modifiedTime,
-                file.size,
-                file.id,
-                fileType,
-                file.webViewLink,
-                truncateItemsForCell(links),
-                truncateItemsForCell(incompatibleFunctions, '; ', true),
-              ];
-              // Note: rowsForSheet removed - sheets are now built from streaming logs
-            }
+          if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
+            // Legacy row data structure no longer used - sheets built from streaming logs
+            // Note: rowsForSheet removed - sheets are now built from streaming logs
           }
         }
 
