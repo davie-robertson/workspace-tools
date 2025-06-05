@@ -82,6 +82,8 @@ Options:
   --json-output <path>          Export consolidated JSON file (optional - streaming logs are always created)
   --json-output-mode <mode>     JSON export mode: overwrite|append (default: overwrite)
   --sheets-output               Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
+  --include-calendars           Include calendar analysis for migration planning
+  --migration-analysis          Enable enhanced migration analysis (sharing, location, calendars)
   --help, -h                    Show this help message
 
 Examples:
@@ -92,6 +94,8 @@ Examples:
   node index.js --sheets-output --json-output ./results.json  # Export to both formats
   node index.js --types sheet,doc                 # Scan only Sheets and Docs
   node index.js --file 1abc...xyz                 # Scan single file
+  node index.js --migration-analysis              # Enable enhanced migration analysis
+  node index.js --include-calendars --users alice@domain.com  # Include calendar analysis
 
 The tool always creates streaming logs (scan-log.jsonl, summary-log.jsonl) during the scan for
 real-time monitoring and data safety. These files are automatically cleaned up after processing.
@@ -106,5 +110,6 @@ Data collected:
 - Drive and Gmail quota information (in MB)
 - External links and incompatible functions (one row per issue in Sheets)
 - Data transfer statistics
+- Migration analysis: sharing patterns, file locations, calendar dependencies (when enabled)
 `);
 }

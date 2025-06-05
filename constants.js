@@ -19,6 +19,7 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/presentations.readonly', // To read Google Slides
   'https://www.googleapis.com/auth/spreadsheets', // Read and Write for output and analysis
   'https://www.googleapis.com/auth/gmail.readonly', // To read Gmail quota information
+  'https://www.googleapis.com/auth/calendar.readonly', // To read calendar events and settings
 ];
 
 // --- SHEET CONSTANTS ---

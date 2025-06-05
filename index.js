@@ -20,6 +20,8 @@ import {
 import { getAllUsers, listUserFiles } from './user-file-management.js';
 import { getFileType, cleanupStreamingLogs } from './utils.js';
 import { parseArgs, validateArgs, showHelp } from './cli.js';
+import { CalendarScanner } from './calendar-scanner.js';
+import { MigrationAnalyzer } from './migration-analyzer.js';
 
 // Parse the command line arguments
 const argv = parseArgs();
@@ -56,6 +58,10 @@ export const jsonOutputFilePath = argv['json-output']; // Matches the new argume
 const jsonOutputMode = argv['json-output-mode'] || 'overwrite'; // Default to 'overwrite'
 // Process --sheets-output flag: determines if Google Sheets output should be generated
 const sheetsOutput = argv['sheets-output'] || false;
+// Process --include-calendars flag: determines if calendar analysis should be included
+const includeCalendars = argv['include-calendars'] || false;
+// Process --migration-analysis flag: enables enhanced migration analysis features
+const migrationAnalysis = argv['migration-analysis'] || false;
 
 // --- ENVIRONMENT VARIABLES ---
 // SECURITY: ADMIN_USER is critical as it defines the user context for Google Workspace Admin SDK calls.
@@ -69,6 +75,14 @@ const OUTPUT_SHEET_ID = process.env.OUTPUT_SHEET_ID;
 if (!ADMIN_USER) {
   console.error(
     "Missing required environment variable: ADMIN_USER. This user account is used to impersonate and access other users' Drive data and list users via the Admin SDK."
+  );
+  process.exit(1);
+}
+
+// Validate PRIMARY_DOMAIN if migration analysis is enabled
+if ((migrationAnalysis || includeCalendars) && !process.env.PRIMARY_DOMAIN) {
+  console.error(
+    'Missing required environment variable: PRIMARY_DOMAIN. This is needed for migration analysis to identify external sharing and cross-tenant dependencies. Please set PRIMARY_DOMAIN in your .env file (e.g., PRIMARY_DOMAIN=yourdomain.com)'
   );
   process.exit(1);
 }
@@ -334,6 +348,16 @@ async function main() {
       }
     } else {
       // --- MULTI-FILE SCAN LOGIC (Iterate through users) ---
+      // Initialize migration analyzer if needed
+      let migrationAnalyzer = null;
+      let allMigrationResults = [];
+      
+      if (migrationAnalysis || includeCalendars) {
+        migrationAnalyzer = new MigrationAnalyzer({
+          includeCalendars: includeCalendars
+        });
+      }
+
       for (const [idx, user] of usersToScan.entries()) {
         const userEmail = user.primaryEmail;
         console.log(
@@ -357,6 +381,13 @@ async function main() {
         // Stream quota data
         streamingLogger.logQuota(userEmail, userQuotaInfo);
 
+        // Perform migration analysis if enabled
+        let migrationResults = null;
+        if (migrationAnalyzer) {
+          migrationResults = await migrationAnalyzer.analyzeUser(userEmail, files, streamingLogger);
+          allMigrationResults.push(migrationResults);
+        }
+
         userStats[userEmail] = {
           doc: 0,
           sheet: 0,
@@ -365,7 +396,7 @@ async function main() {
           docWithLinks: 0,
           sheetWithLinks: 0,
           slideWithLinks: 0,
-          otherWithLinks: 0,
+          otherWithLinks: 0, // Currently not populated, consider if needed
           sheetWithIncompatibleFunctions: 0,
           quotaInfo: userQuotaInfo,
         };
@@ -478,9 +509,24 @@ async function main() {
             fileUrl: file.webViewLink,
             linkedItems: links,
           };
+          
           if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
             fileData.incompatibleFunctions = incompatibleFunctions;
           }
+
+          // Add migration analysis data if available
+          if (migrationResults) {
+            const fileMigrationData = migrationResults.fileAnalysis.find(f => f.fileId === file.id);
+            if (fileMigrationData) {
+              fileData.migrationAnalysis = {
+                sharing: fileMigrationData.sharing,
+                location: fileMigrationData.location,
+                overallRisk: fileMigrationData.overallRisk,
+                migrationIssues: fileMigrationData.migrationIssues
+              };
+            }
+          }
+
           allFilesData.push(fileData);
 
           // Stream file data immediately (for all files, not just those with issues)
@@ -489,6 +535,28 @@ async function main() {
           if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
             // Legacy row data structure no longer used - sheets built from streaming logs
             // Note: rowsForSheet removed - sheets are now built from streaming logs
+          }
+        }
+
+        // Add migration analysis to user stats if performed
+        if (migrationResults) {
+          userStats[userEmail].migrationAnalysis = {
+            totalFiles: migrationResults.migrationSummary.totalFiles,
+            highRiskFiles: migrationResults.migrationSummary.highRiskFiles,
+            mediumRiskFiles: migrationResults.migrationSummary.mediumRiskFiles,
+            lowRiskFiles: migrationResults.migrationSummary.lowRiskFiles,
+            externalShares: migrationResults.migrationSummary.externalShares,
+            publicFiles: migrationResults.migrationSummary.publicFiles
+          };
+
+          if (migrationResults.calendarAnalysis) {
+            userStats[userEmail].calendarAnalysis = {
+              totalCalendars: migrationResults.calendarAnalysis.calendars.length,
+              futureEvents: migrationResults.calendarAnalysis.futureEvents.length,
+              recurringEvents: migrationResults.calendarAnalysis.recurringEvents.length,
+              externalMeetings: migrationResults.calendarAnalysis.externalAttendees.length,
+              migrationRisks: migrationResults.calendarAnalysis.migrationRisks
+            };
           }
         }
 
@@ -691,7 +759,6 @@ async function main() {
   }
 }
 
-// --- SCRIPT EXECUTION ---
 main().catch((error) => {
   console.error('Unhandled error at top level:', error, error.stack);
   process.exit(1);

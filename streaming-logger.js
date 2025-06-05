@@ -98,6 +98,36 @@ export class StreamingLogger {
     });
   }
 
+  // Log calendar analysis data
+  logCalendar(calendarData) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'calendar_analysis',
+        data: calendarData
+      };
+      
+      fs.appendFileSync(this.scanLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log calendar data:', error.message);
+    }
+  }
+
+  // Log migration summary data
+  logMigrationSummary(summaryData) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'migration_summary',
+        data: summaryData
+      };
+      
+      fs.appendFileSync(this.summaryLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log migration summary:', error.message);
+    }
+  }
+
   // Log scan completion
   logScanComplete(totalStats, userStats, scanDuration) {
     this.logSummary({

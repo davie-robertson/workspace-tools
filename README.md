@@ -1,11 +1,26 @@
-# Google Workspace File Scanner
+# Google Workspace Migration Analysis Tool
 
 This Node.js (ESM) project is designed for Google Workspace administrators to audit and analyze Google Workspace files (Docs, Sheets, Slides) across their domain. It scans files for links, compatibility issues, and metadata, and outputs results to a Google Sheet or JSON file for further analysis.
+
+**🚀 NEW: Enhanced Migration Analysis Features**
+- **File Sharing Analysis**: Identifies external shares, public links, and cross-tenant permissions
+- **Drive Location Detection**: Distinguishes personal drives vs shared drives and folder structures  
+- **Calendar Migration Planning**: Scans future events, recurring meetings, and external attendees
+- **Migration Risk Assessment**: Automatically categorizes files and events by migration complexity
 
 ## Features
 - **Comprehensive File Scanning**: Scans Google Docs, Sheets, and Slides for all users in your domain.
 - **Link Extraction**: Identifies and lists links to other Workspace files, including hyperlinks, embedded object links, and formula references.
 - **Google Sheets Compatibility Analysis**: Detects Google Workspace-specific functions in Sheets that may cause compatibility issues with other platforms.
+- **🆕 Migration Analysis**: 
+  - **File Sharing Analysis**: Detects external shares, public links, domain-wide sharing, and cross-tenant permissions
+  - **Drive Location Detection**: Identifies personal drives vs shared drives, folder structures, and orphaned files
+  - **Migration Risk Assessment**: Automatically categorizes files by migration complexity (low/medium/high)
+- **🆕 Calendar Migration Planning**:
+  - **Future Events Analysis**: Scans upcoming events and recurring meetings
+  - **External Dependencies**: Identifies external attendees and cross-tenant meetings
+  - **Meeting Room Resources**: Detects Google Workspace meeting room bookings
+  - **Migration Complexity Assessment**: Categorizes events by migration difficulty
 - **Streaming-First Architecture**: Always creates streaming logs during scan for real-time monitoring and data safety.
 - **Flexible Output Options**:
   - **Streaming Logs**: Always created (JSONL format) and automatically cleaned up after processing.
@@ -250,13 +265,108 @@ node index.js --sheets-output --json-output ./results.json
 node index.js --users alice@domain.com --types doc,sheet --sheets-output --json-output ./alice-scan.json
 ```
 
-### What the Tool Collects
-- **File metadata and sharing permissions**
-- **Drive and Gmail quota information (in MB)**
-- **External links and incompatible functions**
-- **Data transfer statistics**
+### Migration Analysis Usage
 
-Results include both summary statistics and detailed file information.
+**🆕 Enhanced features for workspace migration planning:**
+
+```bash
+# Enable migration analysis for all files (sharing + location analysis)
+node index.js --migration-analysis
+
+# Include calendar analysis for migration planning  
+node index.js --include-calendars --users alice@domain.com
+
+# Full migration analysis (files + calendars)
+node index.js --migration-analysis --include-calendars
+
+# Migration analysis for specific users only
+node index.js --migration-analysis --users alice@domain.com,bob@domain.com
+
+# Export complete migration analysis to JSON
+node index.js --migration-analysis --include-calendars --json-output migration-report.json
+
+# Google Workspace to Microsoft 365 migration assessment
+node index.js --migration-analysis --include-calendars --users alice@domain.com --json-output m365-migration.json
+```
+
+**Migration Analysis Features:**
+- `--migration-analysis` - Enables file sharing and location analysis for migration planning
+- `--include-calendars` - Adds calendar scanning for meeting dependencies and external attendees
+
+**Migration Analysis Output:**
+- **File Sharing Risks**: External shares, public links, cross-tenant permissions
+- **Location Complexity**: Personal drives, shared drives, folder depth analysis  
+- **Calendar Dependencies**: Future events, recurring meetings, external attendees, meeting rooms
+- **Risk Assessment**: Automatic categorization by migration complexity (low/medium/high)
+
+**Required Environment Variables for Migration Analysis:**
+```bash
+PRIMARY_DOMAIN=yourdomain.com  # Your workspace domain for external share detection
+```
+
+## Migration Analysis Features
+
+### File Sharing Analysis
+- **External Share Detection**: Identifies files shared with users outside your primary domain
+- **Public Link Detection**: Finds files with public or "anyone with link" sharing
+- **Cross-Tenant Analysis**: Maps sharing relationships across different Google Workspace tenants
+- **Permission Complexity Assessment**: Categorizes sharing by migration risk level
+- **Domain-Wide Sharing**: Identifies files shared with entire domains
+
+### Drive Location Analysis  
+- **Personal vs Shared Drives**: Distinguishes between individual user drives and shared team drives
+- **Folder Structure Mapping**: Captures full folder paths for migration planning
+- **Orphaned File Detection**: Identifies files without proper folder organization
+- **Migration Complexity Scoring**: Assesses difficulty of moving files based on location and structure
+
+### Calendar Migration Planning
+- **Future Events Scanning**: Analyzes upcoming events up to 2 years in advance
+- **Recurring Meeting Analysis**: Identifies complex recurring patterns that may need special handling
+- **External Attendee Detection**: Maps external meeting participants across domains
+- **Google Meet Integration**: Identifies meetings using Google Meet vs external platforms
+- **Meeting Room Resources**: Detects Google Workspace meeting room bookings
+- **Migration Risk Assessment**: Categorizes events by migration complexity
+
+### Migration Risk Categories
+- **Low Risk**: Simple files with minimal sharing, basic calendar events
+- **Medium Risk**: Files with some external sharing, recurring meetings with external attendees
+- **High Risk**: Complex sharing patterns, shared drive content, public files
+- **Critical Risk**: Extensive cross-tenant dependencies, complex recurring meetings with many externals
+
+## Usage Examples
+
+### Basic Migration Analysis
+```bash
+# Enable migration analysis for all users
+node index.js --migration-analysis
+
+# Analyze specific users with calendar data
+node index.js --migration-analysis --include-calendars --users alice@domain.com,bob@domain.com
+
+# Full migration assessment with JSON export
+node index.js --migration-analysis --include-calendars --json-output migration-report.json
+```
+
+### Targeted Analysis
+```bash
+# Analyze only Google Sheets for formula compatibility
+node index.js --migration-analysis --types sheet --json-output sheets-analysis.json
+
+# Calendar-only analysis for meeting planning
+node index.js --include-calendars --users alice@domain.com --json-output calendar-analysis.json
+
+# Single file migration assessment
+node index.js --migration-analysis --file 1abc123def456ghi789
+```
+
+### Export Options
+```bash
+# Export to Google Sheets with migration data
+node index.js --migration-analysis --sheets-output
+
+# Comprehensive report with all features
+node index.js --migration-analysis --include-calendars --sheets-output --json-output full-report.json
+```
 
 ## Viewing Results
 - **Google Sheets**: Open your configured Google Sheet. The script will create multiple tabs with summary and detailed information.

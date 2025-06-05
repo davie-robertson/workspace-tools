@@ -319,3 +319,197 @@ export async function findLinksInSlide(slideId, userEmail) {
 
   return processRawUrls(drive, rawUrls);
 }
+
+// --- FILE SHARING ANALYSIS ---
+/**
+ * Analyzes file sharing permissions for migration planning
+ * @param {Object} file - Google Drive file object
+ * @param {Object} drive - Google Drive API client
+ * @returns {Object} Sharing analysis data
+ */
+export async function analyzeFileSharing(file, drive) {
+  const sharing = {
+    isPrivate: true,
+    sharedWith: [],
+    sharingType: 'private',
+    externalShares: [],
+    crossTenantShares: [],
+    publicLinks: false,
+    domainSharing: false,
+    migrationRisk: 'low'
+  };
+
+  try {
+    const permissionsResponse = await callWithRetry(async () => {
+      return await drive.permissions.list({
+        fileId: file.id,
+        fields: 'permissions(id,type,role,emailAddress,domain,displayName,allowFileDiscovery)'
+      });
+    });
+
+    const permissions = permissionsResponse.data.permissions || [];
+
+    for (const permission of permissions) {
+      if (permission.type === 'anyone') {
+        sharing.publicLinks = true;
+        sharing.sharingType = 'public';
+        sharing.isPrivate = false;
+      } else if (permission.type === 'domain') {
+        sharing.domainSharing = true;
+        sharing.sharingType = 'domain-wide';
+        sharing.isPrivate = false;
+      } else if (permission.emailAddress) {
+        sharing.isPrivate = false;
+        const shareInfo = {
+          email: permission.emailAddress,
+          role: permission.role,
+          displayName: permission.displayName,
+          domain: permission.emailAddress?.split('@')[1],
+          type: permission.type
+        };
+        
+        sharing.sharedWith.push(shareInfo);
+
+        // Check for external/cross-tenant sharing
+        const domain = permission.emailAddress.split('@')[1];
+        const primaryDomain = process.env.PRIMARY_DOMAIN;
+        
+        if (domain && domain !== primaryDomain) {
+          sharing.externalShares.push(shareInfo);
+          sharing.crossTenantShares.push(permission.emailAddress);
+        }
+      }
+    }
+
+    // Assess migration risk based on sharing complexity
+    sharing.migrationRisk = assessSharingMigrationRisk(sharing);
+
+  } catch (error) {
+    console.error(`Error analyzing sharing for ${file.id} (${file.name}):`, error.message);
+    sharing.error = error.message;
+  }
+
+  return sharing;
+}
+
+/**
+ * Analyzes file location and folder structure for migration planning
+ * @param {Object} file - Google Drive file object
+ * @param {Object} drive - Google Drive API client
+ * @returns {Object} Location analysis data
+ */
+export async function analyzeFileLocation(file, drive) {
+  const location = {
+    type: 'unknown',
+    ownerEmail: null,
+    sharedDriveName: null,
+    sharedDriveId: null,
+    folderPath: [],
+    isOrphan: false,
+    isInRoot: false,
+    migrationComplexity: 'low'
+  };
+
+  try {
+    // Check if file is in a shared drive
+    if (file.driveId) {
+      try {
+        const driveInfoResponse = await callWithRetry(async () => {
+          return await drive.drives.get({
+            driveId: file.driveId,
+            fields: 'id,name'
+          });
+        });
+        
+        location.type = 'shared-drive';
+        location.sharedDriveName = driveInfoResponse.data.name;
+        location.sharedDriveId = file.driveId;
+      } catch (error) {
+        location.type = 'shared-drive-inaccessible';
+        location.sharedDriveId = file.driveId;
+      }
+    } else {
+      location.type = 'personal-drive';
+      location.ownerEmail = file.owners?.[0]?.emailAddress;
+    }
+
+    // Get folder path
+    if (file.parents && file.parents.length > 0) {
+      location.folderPath = await buildFolderPath(file.parents[0], drive);
+      location.isInRoot = location.folderPath.length === 0;
+    } else {
+      location.isOrphan = true;
+    }
+
+    // Assess migration complexity
+    location.migrationComplexity = assessLocationMigrationComplexity(location);
+
+  } catch (error) {
+    console.error(`Error analyzing location for ${file.id} (${file.name}):`, error.message);
+    location.error = error.message;
+  }
+
+  return location;
+}
+
+/**
+ * Builds the full folder path for a file
+ * @param {string} folderId - Starting folder ID
+ * @param {Object} drive - Google Drive API client
+ * @param {Array} path - Accumulated path (for recursion)
+ * @returns {Array} Array of folder names representing the path
+ */
+async function buildFolderPath(folderId, drive, path = []) {
+  try {
+    const folderResponse = await callWithRetry(async () => {
+      return await drive.files.get({
+        fileId: folderId,
+        fields: 'id,name,parents'
+      });
+    });
+    
+    const folder = folderResponse.data;
+    
+    // Don't include root folder in path
+    if (folder.name && folder.name !== 'My Drive') {
+      path.unshift(folder.name);
+    }
+    
+    // Continue up the hierarchy if there are parents
+    if (folder.parents && folder.parents.length > 0) {
+      return await buildFolderPath(folder.parents[0], drive, path);
+    }
+    
+    return path;
+  } catch (error) {
+    // If we can't access a parent folder, return what we have
+    console.warn(`Could not access folder ${folderId}: ${error.message}`);
+    return path;
+  }
+}
+
+/**
+ * Assesses migration risk based on sharing configuration
+ * @param {Object} sharing - Sharing analysis data
+ * @returns {string} Risk level (low, medium, high)
+ */
+function assessSharingMigrationRisk(sharing) {
+  if (sharing.publicLinks) return 'high';
+  if (sharing.externalShares.length > 5) return 'high';
+  if (sharing.domainSharing) return 'medium';
+  if (sharing.externalShares.length > 0) return 'medium';
+  if (sharing.sharedWith.length > 10) return 'medium';
+  return 'low';
+}
+
+/**
+ * Assesses migration complexity based on file location
+ * @param {Object} location - Location analysis data
+ * @returns {string} Complexity level (low, medium, high)
+ */
+function assessLocationMigrationComplexity(location) {
+  if (location.type === 'shared-drive') return 'high';
+  if (location.folderPath.length > 5) return 'medium';
+  if (location.isOrphan) return 'medium';
+  return 'low';
+}
