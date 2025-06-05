@@ -348,18 +348,22 @@ export async function analyzeFileSharing(file, drive) {
     });
 
     const permissions = permissionsResponse.data.permissions || [];
+    
+    // Count non-owner permissions to determine if file is truly shared
+    let nonOwnerPermissions = 0;
 
     for (const permission of permissions) {
       if (permission.type === 'anyone') {
         sharing.publicLinks = true;
         sharing.sharingType = 'public';
         sharing.isPrivate = false;
+        nonOwnerPermissions++;
       } else if (permission.type === 'domain') {
         sharing.domainSharing = true;
         sharing.sharingType = 'domain-wide';
         sharing.isPrivate = false;
+        nonOwnerPermissions++;
       } else if (permission.emailAddress) {
-        sharing.isPrivate = false;
         const shareInfo = {
           email: permission.emailAddress,
           role: permission.role,
@@ -370,6 +374,12 @@ export async function analyzeFileSharing(file, drive) {
         
         sharing.sharedWith.push(shareInfo);
 
+        // Only count as non-private if it's not the owner or if there are multiple user permissions
+        if (permission.role !== 'owner') {
+          sharing.isPrivate = false;
+          nonOwnerPermissions++;
+        }
+
         // Check for external/cross-tenant sharing
         const domain = permission.emailAddress.split('@')[1];
         const primaryDomain = process.env.PRIMARY_DOMAIN;
@@ -377,8 +387,17 @@ export async function analyzeFileSharing(file, drive) {
         if (domain && domain !== primaryDomain) {
           sharing.externalShares.push(shareInfo);
           sharing.crossTenantShares.push(permission.emailAddress);
+          if (permission.role !== 'owner') {
+            sharing.isPrivate = false;
+          }
         }
       }
+    }
+
+    // Final determination: if only owner permissions exist, file is private
+    if (nonOwnerPermissions === 0) {
+      sharing.isPrivate = true;
+      sharing.sharingType = 'private';
     }
 
     // Assess migration risk based on sharing complexity

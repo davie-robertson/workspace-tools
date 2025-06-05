@@ -62,6 +62,11 @@ export class MigrationAnalyzer {
         const calendarScanner = new CalendarScanner(userAuth);
         results.calendarAnalysis = await calendarScanner.scanUserCalendars(userEmail);
         
+        // Log service availability for migration planning
+        if (results.calendarAnalysis.calendarDisabled) {
+          console.log(`  Calendar service disabled for ${userEmail} - no calendar migration needed`);
+        }
+        
         // Log calendar data
         if (streamingLogger) {
           streamingLogger.logCalendar(results.calendarAnalysis);

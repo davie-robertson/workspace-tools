@@ -39,6 +39,9 @@ export async function buildSheetsFromStreamingLogs(sheets, spreadsheetId, scanLo
     // Create quota tab  
     await writeQuotaTab(sheetManager, userStats);
     
+    // Create Drive analysis tabs if data is available
+    await writeDriveAnalysisTabs(sheetManager, summaryData);
+    
     console.log('Google Sheets successfully built from streaming logs');
     
   } catch (error) {
@@ -318,3 +321,332 @@ export async function writeQuotaTab(sheetManager, userStats) {
  * @param {Array} fileData - Array of file data from scan logs
  */
 // Legacy scanning functions below - these may be moved to a separate module in the future
+
+/**
+ * Writes Drive analysis data to dedicated sheets
+ * 
+ * @async
+ * @param {SheetManager} sheetManager - Sheet manager instance
+ * @param {Array} summaryData - Summary log data containing Drive analysis
+ */
+async function writeDriveAnalysisTabs(sheetManager, summaryData) {
+  // Extract Drive analysis data from summary logs
+  const driveAnalysisData = [];
+  const sharedDrivesData = [];
+  const externalSharingData = [];
+  const orphanedFilesData = [];
+  const driveMembersData = [];
+  
+  summaryData.forEach(event => {
+    if (event.type === 'drive_analysis') {
+      const analysis = event.data;
+      driveAnalysisData.push({
+        userEmail: event.userEmail,
+        ...analysis
+      });
+      
+      // Extract shared drives data with enhanced details
+      if (analysis.sharedDrives && analysis.sharedDrives.length > 0) {
+        analysis.sharedDrives.forEach(drive => {
+          const driveData = {
+            userEmail: event.userEmail,
+            driveName: drive.name,
+            driveId: drive.id,
+            userRole: drive.userRole,
+            totalMembers: drive.members ? drive.members.length : 0,
+            externalMembers: drive.externalMembers || 0,
+            totalFiles: drive.totalFiles || 0,
+            sharedFiles: drive.sharedFiles || 0,
+            publicFiles: drive.publicFiles || 0,
+            externalShares: drive.externalShares || 0,
+            riskLevel: drive.riskLevel || 'low',
+            createdTime: drive.createdTime || '',
+            adminManagedRestrictions: drive.restrictions?.adminManagedRestrictions ? 'Yes' : 'No',
+            copyRequiresWriterPermission: drive.restrictions?.copyRequiresWriterPermission ? 'Yes' : 'No',
+            error: drive.error || ''
+          };
+          sharedDrivesData.push(driveData);
+          
+          // Extract drive members data if available
+          if (drive.members && drive.members.length > 0) {
+            drive.members.forEach(member => {
+              driveMembersData.push({
+                userEmail: event.userEmail,
+                driveName: drive.name,
+                driveId: drive.id,
+                memberEmail: member.email,
+                memberRole: member.role,
+                memberDisplayName: member.displayName || '',
+                memberType: member.type,
+                memberDomain: member.domain || '',
+                isExternal: member.domain !== process.env.PRIMARY_DOMAIN ? 'Yes' : 'No'
+              });
+            });
+          }
+        });
+      }
+      
+      // Extract orphaned files data
+      if (analysis.orphanedFiles && analysis.orphanedFiles.length > 0) {
+        analysis.orphanedFiles.forEach(file => {
+          orphanedFilesData.push({
+            userEmail: event.userEmail,
+            fileName: file.name,
+            fileId: file.id,
+            mimeType: file.mimeType,
+            fileSizeBytes: file.size || 0,
+            fileSizeMB: file.size ? Math.round(file.size / (1024 * 1024) * 100) / 100 : 0,
+            createdTime: file.createdTime || '',
+            modifiedTime: file.modifiedTime || ''
+          });
+        });
+      }
+      
+      // Extract detailed external sharing data with document information
+      if (analysis.externalShareDetails && analysis.externalShareDetails.length > 0) {
+        analysis.externalShareDetails.forEach(shareDetail => {
+          externalSharingData.push({
+            userEmail: event.userEmail,
+            externalUser: shareDetail.externalUser,
+            externalDomain: shareDetail.externalDomain,
+            documentId: shareDetail.documentId,
+            documentName: shareDetail.documentName,
+            documentType: shareDetail.documentType,
+            sharedDriveId: shareDetail.sharedDriveId || '',
+            sharedDriveName: shareDetail.sharedDriveName || '',
+            role: shareDetail.role,
+            permissionType: shareDetail.permissionType,
+            source: 'Drive Analysis'
+          });
+        });
+      }
+    }
+  });
+  
+  // Write Drive Analysis summary sheet
+  if (driveAnalysisData.length > 0) {
+    await writeDriveAnalysisSheet(sheetManager, driveAnalysisData);
+  }
+  
+  // Write Shared Drives sheet
+  if (sharedDrivesData.length > 0) {
+    await writeSharedDrivesSheet(sheetManager, sharedDrivesData);
+  }
+  
+  // Write External Sharing sheet
+  if (externalSharingData.length > 0) {
+    await writeExternalSharingSheet(sheetManager, externalSharingData);
+  }
+  
+  // Write Orphaned Files sheet
+  if (orphanedFilesData.length > 0) {
+    await writeOrphanedFilesSheet(sheetManager, orphanedFilesData);
+  }
+  
+  // Write Drive Members sheet
+  if (driveMembersData.length > 0) {
+    await writeDriveMembersSheet(sheetManager, driveMembersData);
+  }
+}
+
+/**
+ * Writes Drive Analysis summary sheet
+ */
+async function writeDriveAnalysisSheet(sheetManager, driveAnalysisData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.DRIVES);
+  
+  const headers = [
+    'User Email',
+    'My Drive Files',
+    'My Drive Shared Files',
+    'My Drive Public Files',
+    'My Drive External Shares',
+    'My Drive Storage (MB)',
+    'My Drive Link Sharing Enabled',
+    'My Drive Last Activity',
+    'My Drive Risk Level',
+    'Total Shared Drives',
+    'Total External Users',
+    'Total Orphaned Files',
+    'Overall Risk Level',
+    'Has External Sharing',
+    'Analysis Timestamp',
+    'Analysis Error'
+  ];
+  
+  const rows = [headers];
+  
+  driveAnalysisData.forEach(analysis => {
+    rows.push([
+      analysis.userEmail,
+      analysis.myDrive?.totalFiles || 0,
+      analysis.myDrive?.sharedFiles || 0,
+      analysis.myDrive?.publicFiles || 0,
+      analysis.myDrive?.externalShares || 0,
+      analysis.myDrive?.storageUsed || 0,
+      analysis.myDrive?.linkSharingEnabled ? 'Yes' : 'No',
+      analysis.myDrive?.lastActivity || '',
+      analysis.myDrive?.riskLevel || 'low',
+      analysis.summary?.totalSharedDrives || 0,
+      analysis.summary?.totalExternalUsers || 0,
+      analysis.summary?.totalOrphanedFiles || 0,
+      analysis.summary?.riskLevel || 'low',
+      analysis.summary?.hasExternalSharing ? 'Yes' : 'No',
+      analysis.timestamp || '',
+      analysis.error || ''
+    ]);
+  });
+  
+  await sheetManager.writeData(SHEET_NAMES.DRIVES, 'A1', rows);
+  console.log(`Drive Analysis sheet created with ${driveAnalysisData.length} user records`);
+}
+
+/**
+ * Writes Shared Drives sheet
+ */
+async function writeSharedDrivesSheet(sheetManager, sharedDrivesData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.SHARED_DRIVES);
+  
+  const headers = [
+    'User Email',
+    'Drive Name',
+    'Drive ID',
+    'User Role',
+    'Total Members',
+    'External Members',
+    'Total Files',
+    'Shared Files',
+    'Public Files', 
+    'External Shares',
+    'Risk Level',
+    'Created Time',
+    'Admin Managed Restrictions',
+    'Copy Requires Writer Permission',
+    'Analysis Error'
+  ];
+  
+  const rows = [headers, ...sharedDrivesData.map(drive => [
+    drive.userEmail,
+    drive.driveName,
+    drive.driveId,
+    drive.userRole,
+    drive.totalMembers,
+    drive.externalMembers,
+    drive.totalFiles,
+    drive.sharedFiles,
+    drive.publicFiles,
+    drive.externalShares,
+    drive.riskLevel,
+    drive.createdTime,
+    drive.adminManagedRestrictions || 'Unknown',
+    drive.copyRequiresWriterPermission || 'Unknown',
+    drive.error || ''
+  ])];
+  
+  await sheetManager.writeData(SHEET_NAMES.SHARED_DRIVES, 'A1', rows);
+  console.log(`Shared Drives sheet created with ${sharedDrivesData.length} drive records`);
+}
+
+/**
+ * Writes External Sharing sheet
+ */
+async function writeExternalSharingSheet(sheetManager, externalSharingData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.EXTERNAL_SHARING);
+  
+  const headers = [
+    'User Email',
+    'External User',
+    'External Domain',
+    'Document ID',
+    'Document Name', 
+    'Document Type',
+    'Shared Drive ID',
+    'Shared Drive Name',
+    'Role',
+    'Permission Type',
+    'Source'
+  ];
+  
+  const rows = [headers, ...externalSharingData.map(share => [
+    share.userEmail,
+    share.externalUser,
+    share.externalDomain || '',
+    share.documentId || '',
+    share.documentName || '',
+    share.documentType || '',
+    share.sharedDriveId || '',
+    share.sharedDriveName || '',
+    share.role || '',
+    share.permissionType || '',
+    share.source
+  ])];
+  
+  await sheetManager.writeData(SHEET_NAMES.EXTERNAL_SHARING, 'A1', rows);
+  console.log(`External Sharing sheet created with ${externalSharingData.length} external user records`);
+}
+
+/**
+ * Writes Orphaned Files sheet
+ */
+async function writeOrphanedFilesSheet(sheetManager, orphanedFilesData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.ORPHANED_FILES);
+  
+  const headers = [
+    'User Email',
+    'File Name',
+    'File ID',
+    'MIME Type',
+    'File Size (MB)',
+    'File Size (Bytes)',
+    'Created Time',
+    'Modified Time'
+  ];
+  
+  const rows = [headers, ...orphanedFilesData.map(file => [
+    file.userEmail,
+    file.fileName,
+    file.fileId,
+    file.mimeType,
+    file.fileSizeMB,
+    file.fileSizeBytes,
+    file.createdTime,
+    file.modifiedTime
+  ])];
+  
+  await sheetManager.writeData(SHEET_NAMES.ORPHANED_FILES, 'A1', rows);
+  console.log(`Orphaned Files sheet created with ${orphanedFilesData.length} file records`);
+}
+
+/**
+ * Writes Drive Members sheet
+ */
+async function writeDriveMembersSheet(sheetManager, driveMembersData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.DRIVE_MEMBERS);
+  
+  const headers = [
+    'User Email',
+    'Drive Name',
+    'Drive ID',
+    'Member Email',
+    'Member Role',
+    'Member Display Name',
+    'Member Type',
+    'Member Domain',
+    'Is External'
+  ];
+  
+  const rows = [headers, ...driveMembersData.map(member => [
+    member.userEmail,
+    member.driveName,
+    member.driveId,
+    member.memberEmail,
+    member.memberRole,
+    member.memberDisplayName,
+    member.memberType,
+    member.memberDomain,
+    member.isExternal
+  ])];
+  
+  await sheetManager.writeData(SHEET_NAMES.DRIVE_MEMBERS, 'A1', rows);
+  console.log(`Drive Members sheet created with ${driveMembersData.length} member records`);
+}

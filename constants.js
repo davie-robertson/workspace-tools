@@ -32,7 +32,12 @@ export const SHEET_NAMES = {
   SUMMARY: 'Summary',
   ISSUES: 'Issues', 
   QUOTA: 'UserQuota',
-  CHART: 'Issue Chart'
+  CHART: 'Issue Chart',
+  DRIVES: 'Drive Analysis',
+  SHARED_DRIVES: 'Shared Drives',
+  EXTERNAL_SHARING: 'External Sharing',
+  ORPHANED_FILES: 'Orphaned Files',
+  DRIVE_MEMBERS: 'Drive Members'
 };
 
 // Issue types

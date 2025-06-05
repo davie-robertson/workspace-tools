@@ -21,6 +21,17 @@ This Node.js (ESM) project is designed for Google Workspace administrators to au
   - **External Dependencies**: Identifies external attendees and cross-tenant meetings
   - **Meeting Room Resources**: Detects Google Workspace meeting room bookings
   - **Migration Complexity Assessment**: Categorizes events by migration difficulty
+- **🆕 Drive Analysis**: 
+  - **My Drive Analysis**: Scans user's personal Drive for file counts, sharing patterns, and storage usage
+  - **Shared Drive Discovery**: Identifies all Shared Drives accessible to users
+  - **External User Detection**: Finds users outside your domain with access to drives and files
+  - **Orphaned File Identification**: Discovers files without proper folder organization
+  - **Drive Member Analysis**: Analyzes Shared Drive membership and roles
+  - **Risk Assessment**: Categorizes drives by security and migration risk levels
+- **🆕 Comprehensive External Sharing Analysis**:
+  - **Cross-Domain Sharing**: Identifies files and drives shared with external domains
+  - **Public Link Detection**: Finds files with public or "anyone with link" access
+  - **Drive-Level Permissions**: Analyzes Shared Drive member permissions and restrictions
 - **Streaming-First Architecture**: Always creates streaming logs during scan for real-time monitoring and data safety.
 - **Flexible Output Options**:
   - **Streaming Logs**: Always created (JSONL format) and automatically cleaned up after processing.
@@ -366,6 +377,24 @@ node index.js --migration-analysis --sheets-output
 
 # Comprehensive report with all features
 node index.js --migration-analysis --include-calendars --sheets-output --json-output full-report.json
+```
+
+### Drive Analysis
+```bash
+# Enable comprehensive Drive analysis
+node index.js --drive-analysis
+
+# Include Shared Drive analysis
+node index.js --drive-analysis --include-shared-drives
+
+# Include Drive member analysis
+node index.js --drive-analysis --include-shared-drives --include-drive-members
+
+# Combine with migration analysis for complete audit
+node index.js --migration-analysis --drive-analysis --include-shared-drives
+
+# Export Drive analysis to JSON
+node index.js --drive-analysis --json-output ./drive-audit.json
 ```
 
 ## Viewing Results

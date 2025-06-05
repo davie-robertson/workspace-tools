@@ -35,10 +35,24 @@ export class CalendarScanner {
     try {
       console.log(`Scanning calendars for ${userEmail}...`);
       
+      // Check if user has calendar access by doing a lightweight test call first
+      try {
+        await this.calendar.calendarList.list({ maxResults: 1 });
+      } catch (error) {
+        if (error.message.includes('must be signed up for Google Calendar') || 
+            error.message.includes('not found') || 
+            error.code === 404) {
+          console.log(`User ${userEmail} does not have Google Calendar enabled. Skipping calendar analysis.`);
+          migrationIssues.calendarDisabled = true;
+          return migrationIssues;
+        }
+        throw error; // Re-throw if it's a different error
+      }
+      
       // Get all calendars for user
       const calendarListResponse = await callWithRetry(async () => {
         return await this.calendar.calendarList.list();
-      });
+      }, 1); // Use minimal retries since we already tested access
       
       if (!calendarListResponse.data.items) {
         console.log(`No calendars found for ${userEmail}`);

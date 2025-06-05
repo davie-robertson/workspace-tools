@@ -128,6 +128,86 @@ export class StreamingLogger {
     }
   }
 
+  // Log Drive analysis summary
+  logDriveSummary(userEmail, driveSummary) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'drive_summary',
+        userEmail: userEmail,
+        data: driveSummary
+      };
+      
+      fs.appendFileSync(this.summaryLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log drive summary:', error.message);
+    }
+  }
+
+  // Log individual Drive analysis
+  logDriveAnalysis(userEmail, driveAnalysis) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'drive_analysis',
+        userEmail: userEmail,
+        data: driveAnalysis
+      };
+      
+      fs.appendFileSync(this.summaryLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log drive analysis:', error.message);
+    }
+  }
+
+  // Log Drive analysis events
+  logDriveEvent(userEmail, driveEvent) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'drive_event',
+        user: userEmail,
+        data: driveEvent
+      };
+      
+      fs.appendFileSync(this.scanLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log drive event:', error.message);
+    }
+  }
+
+  // Log external sharing events with document details
+  logExternalSharingEvent(userEmail, shareEvent) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'external_sharing_event',
+        user: userEmail,
+        data: shareEvent
+      };
+      
+      fs.appendFileSync(this.scanLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log external sharing event:', error.message);
+    }
+  }
+
+  // Log Shared Drive events
+  logSharedDriveEvent(userEmail, sharedDriveEvent) {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        type: 'shared_drive_event',
+        user: userEmail,
+        data: sharedDriveEvent
+      };
+      
+      fs.appendFileSync(this.scanLogPath, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+      console.error('Failed to log shared drive event:', error.message);
+    }
+  }
+
   // Log scan completion
   logScanComplete(totalStats, userStats, scanDuration) {
     this.logSummary({
@@ -165,6 +245,7 @@ export class StreamingLogger {
       // Extract file data
       const files = [];
       const userStats = {};
+      const driveAnalysisResults = [];
       let totalStats = {};
       let scanStartTime = null;
       let scanEndTime = null;
@@ -175,6 +256,8 @@ export class StreamingLogger {
           const entry = JSON.parse(line);
           if (entry.type === 'file_processed') {
             files.push(entry.data);
+          } else if (entry.type === 'drive_analysis') {
+            driveAnalysisResults.push(entry.data);
           }
         } catch (e) {
           console.warn('Skipped malformed scan log entry:', e.message);
@@ -210,6 +293,23 @@ export class StreamingLogger {
         },
         files: files
       };
+
+      // Add Drive analysis data if available
+      if (driveAnalysisResults.length > 0) {
+        consolidatedData.driveAnalysis = driveAnalysisResults;
+        
+        // Add global Drive summary
+        consolidatedData.summary.driveAnalysisSummary = {
+          totalUsersAnalyzed: driveAnalysisResults.length,
+          totalSharedDrives: driveAnalysisResults.reduce((sum, result) => sum + result.summary.totalSharedDrives, 0),
+          totalExternalUsers: [...new Set(driveAnalysisResults.flatMap(result => result.externalUsers || []))].length,
+          totalOrphanedFiles: driveAnalysisResults.reduce((sum, result) => sum + result.summary.totalOrphanedFiles, 0),
+          usersWithExternalSharing: driveAnalysisResults.filter(result => result.summary.hasExternalSharing).length,
+          highRiskUsers: driveAnalysisResults.filter(result => result.summary.riskLevel === 'high').length,
+          mediumRiskUsers: driveAnalysisResults.filter(result => result.summary.riskLevel === 'medium').length,
+          lowRiskUsers: driveAnalysisResults.filter(result => result.summary.riskLevel === 'low').length
+        };
+      }
       
       // Write consolidated JSON
       fs.writeFileSync(outputFilePath, JSON.stringify(consolidatedData, null, 2));

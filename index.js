@@ -22,6 +22,7 @@ import { getFileType, cleanupStreamingLogs } from './utils.js';
 import { parseArgs, validateArgs, showHelp } from './cli.js';
 import { CalendarScanner } from './calendar-scanner.js';
 import { MigrationAnalyzer } from './migration-analyzer.js';
+import { DriveAnalyzer } from './drive-analyzer.js';
 
 // Parse the command line arguments
 const argv = parseArgs();
@@ -62,6 +63,12 @@ const sheetsOutput = argv['sheets-output'] || false;
 const includeCalendars = argv['include-calendars'] || false;
 // Process --migration-analysis flag: enables enhanced migration analysis features
 const migrationAnalysis = argv['migration-analysis'] || false;
+// Process --drive-analysis flag: enables comprehensive Drive analysis
+const driveAnalysis = argv['drive-analysis'] || false;
+// Process --include-shared-drives flag: includes Shared Drive analysis (requires --drive-analysis)
+const includeSharedDrives = argv['include-shared-drives'] || false;
+// Process --include-drive-members flag: includes Drive member analysis (requires --drive-analysis)
+const includeDriveMembers = argv['include-drive-members'] || false;
 
 // --- ENVIRONMENT VARIABLES ---
 // SECURITY: ADMIN_USER is critical as it defines the user context for Google Workspace Admin SDK calls.
@@ -79,10 +86,10 @@ if (!ADMIN_USER) {
   process.exit(1);
 }
 
-// Validate PRIMARY_DOMAIN if migration analysis is enabled
-if ((migrationAnalysis || includeCalendars) && !process.env.PRIMARY_DOMAIN) {
+// Validate PRIMARY_DOMAIN if migration analysis or drive analysis is enabled
+if ((migrationAnalysis || includeCalendars || driveAnalysis) && !process.env.PRIMARY_DOMAIN) {
   console.error(
-    'Missing required environment variable: PRIMARY_DOMAIN. This is needed for migration analysis to identify external sharing and cross-tenant dependencies. Please set PRIMARY_DOMAIN in your .env file (e.g., PRIMARY_DOMAIN=yourdomain.com)'
+    'Missing required environment variable: PRIMARY_DOMAIN. This is needed for migration analysis and drive analysis to identify external sharing and cross-tenant dependencies. Please set PRIMARY_DOMAIN in your .env file (e.g., PRIMARY_DOMAIN=yourdomain.com)'
   );
   process.exit(1);
 }
@@ -170,6 +177,8 @@ async function main() {
 
     // Initialize arrays and objects to store scan results.
     const allFilesData = []; // Stores detailed data for each file found with links/issues.
+    let allMigrationResults = []; // For migration analysis results
+    let allDriveResults = []; // For drive analysis results
 
     // Initialize statistics objects.
     const userStats = {}; // Per-user statistics.
@@ -350,11 +359,21 @@ async function main() {
       // --- MULTI-FILE SCAN LOGIC (Iterate through users) ---
       // Initialize migration analyzer if needed
       let migrationAnalyzer = null;
-      let allMigrationResults = [];
       
       if (migrationAnalysis || includeCalendars) {
         migrationAnalyzer = new MigrationAnalyzer({
           includeCalendars: includeCalendars
+        });
+      }
+
+      // Initialize Drive analyzer if needed
+      let driveAnalyzer = null;
+      
+      if (driveAnalysis) {
+        driveAnalyzer = new DriveAnalyzer({
+          includeSharedDrives: includeSharedDrives,
+          includeMembers: includeDriveMembers,
+          includeExternalSharing: true
         });
       }
 
@@ -386,6 +405,17 @@ async function main() {
         if (migrationAnalyzer) {
           migrationResults = await migrationAnalyzer.analyzeUser(userEmail, files, streamingLogger);
           allMigrationResults.push(migrationResults);
+        }
+
+        // Perform Drive analysis if enabled
+        let driveResults = null;
+        if (driveAnalyzer) {
+          console.log(`Analyzing drives for ${userEmail}...`);
+          driveResults = await driveAnalyzer.analyzeUserDrives(userEmail, streamingLogger);
+          allDriveResults.push(driveResults);
+          
+          // Log detailed Drive analysis
+          streamingLogger.logDriveAnalysis(userEmail, driveResults);
         }
 
         userStats[userEmail] = {
@@ -555,9 +585,25 @@ async function main() {
               futureEvents: migrationResults.calendarAnalysis.futureEvents.length,
               recurringEvents: migrationResults.calendarAnalysis.recurringEvents.length,
               externalMeetings: migrationResults.calendarAnalysis.externalAttendees.length,
-              migrationRisks: migrationResults.calendarAnalysis.migrationRisks
+              migrationRisks: migrationResults.calendarAnalysis.migrationRisks,
+              calendarDisabled: migrationResults.calendarAnalysis.calendarDisabled || false
             };
           }
+        }
+
+        // Add Drive analysis to user stats if performed
+        if (driveResults) {
+          userStats[userEmail].driveAnalysis = {
+            totalSharedDrives: driveResults.summary.totalSharedDrives,
+            totalExternalUsers: driveResults.summary.totalExternalUsers,
+            totalOrphanedFiles: driveResults.summary.totalOrphanedFiles,
+            hasExternalSharing: driveResults.summary.hasExternalSharing,
+            riskLevel: driveResults.summary.riskLevel,
+            myDriveFiles: driveResults.myDrive?.totalFiles || 0,
+            myDriveSharedFiles: driveResults.myDrive?.sharedFiles || 0,
+            myDrivePublicFiles: driveResults.myDrive?.publicFiles || 0,
+            myDriveStorageUsed: driveResults.myDrive?.storageUsed || 0
+          };
         }
 
         // Log user processing completion
@@ -620,6 +666,23 @@ async function main() {
           },
           files: JSON.parse(JSON.stringify(allFilesData)),
         };
+
+        // Add Drive analysis results if available
+        if (allDriveResults.length > 0) {
+          jsonDataToWrite.driveAnalysis = JSON.parse(JSON.stringify(allDriveResults));
+          
+          // Add global Drive summary
+          jsonDataToWrite.summary.driveAnalysisSummary = {
+            totalUsersAnalyzed: allDriveResults.length,
+            totalSharedDrives: allDriveResults.reduce((sum, result) => sum + result.summary.totalSharedDrives, 0),
+            totalExternalUsers: [...new Set(allDriveResults.flatMap(result => result.externalUsers || []))].length,
+            totalOrphanedFiles: allDriveResults.reduce((sum, result) => sum + result.summary.totalOrphanedFiles, 0),
+            usersWithExternalSharing: allDriveResults.filter(result => result.summary.hasExternalSharing).length,
+            highRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'high').length,
+            mediumRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'medium').length,
+            lowRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'low').length
+          };
+        }
 
         if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
           console.log(
