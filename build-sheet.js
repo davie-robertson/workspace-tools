@@ -172,23 +172,6 @@ function buildIssueRows(fileData) {
         ]);
       });
     }
-    
-    // Add row for files with no issues (for completeness)
-    if ((!file.linkedItems || file.linkedItems.length === 0) && 
-        (!file.incompatibleFunctions || file.incompatibleFunctions.length === 0)) {
-      rows.push([
-        ISSUE_TYPES.NO_ISSUES,
-        'File scanned successfully with no issues found',
-        file.ownerEmail,
-        file.fileName,
-        file.fileType,
-        file.fileId,
-        file.fileUrl,
-        file.createdTime,
-        file.modifiedTime,
-        file.size
-      ]);
-    }
   });
   
   return rows;
