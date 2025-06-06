@@ -3,7 +3,7 @@
  * Handles common Google Sheets operations to reduce duplication
  */
 
-import { callWithRetry } from "./API-Calls.js";
+import { apiClient } from "./api-client.js";
 
 /**
  * Generic sheet manager class following SOLID principles
@@ -12,6 +12,7 @@ export class SheetManager {
   constructor(sheets, spreadsheetId) {
     this.sheets = sheets;
     this.spreadsheetId = spreadsheetId;
+    this.apiClient = apiClient;
   }
 
   /**
@@ -22,7 +23,7 @@ export class SheetManager {
    */
   async getOrCreateSheet(sheetName, clearContent = true) {
     try {
-      const sp = await callWithRetry(() => this.sheets.spreadsheets.get({
+      const sp = await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.get({
         spreadsheetId: this.spreadsheetId,
         fields: 'sheets.properties',
       }));
@@ -43,7 +44,7 @@ export class SheetManager {
         return sheetId;
       } else {
         // Create new sheet
-        const response = await callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
+        const response = await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
           spreadsheetId: this.spreadsheetId,
           resource: {
             requests: [{
@@ -68,7 +69,7 @@ export class SheetManager {
    * @param {string} sheetName - Name of the sheet to clear
    */
   async clearSheet(sheetName) {
-    await callWithRetry(() => this.sheets.spreadsheets.values.clear({
+    await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.values.clear({
       spreadsheetId: this.spreadsheetId,
       range: `${sheetName}!A:Z`
     }));
@@ -81,7 +82,7 @@ export class SheetManager {
    * @param {Array<Array>} data - 2D array of data
    */
   async writeData(sheetName, range, data) {
-    const result = await callWithRetry(() => this.sheets.spreadsheets.values.update({
+    const result = await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.values.update({
       spreadsheetId: this.spreadsheetId,
       range: `${sheetName}!${range}`,
       valueInputOption: 'RAW',
@@ -96,7 +97,7 @@ export class SheetManager {
    * @param {string} range - Range to read from (e.g., 'A:B')
    */
   async readData(sheetName, range) {
-    const response = await callWithRetry(() => this.sheets.spreadsheets.values.get({
+    const response = await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.values.get({
       spreadsheetId: this.spreadsheetId,
       range: `${sheetName}!${range}`,
     }));
@@ -109,7 +110,7 @@ export class SheetManager {
    */
   async deleteCharts(sheetId) {
     try {
-      const sheetWithCharts = await callWithRetry(() => this.sheets.spreadsheets.get({
+      const sheetWithCharts = await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.get({
         spreadsheetId: this.spreadsheetId,
         fields: 'sheets(properties.sheetId,charts.chartId)',
       }));
@@ -122,7 +123,7 @@ export class SheetManager {
           }
         }));
         
-        await callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
+        await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
           spreadsheetId: this.spreadsheetId,
           resource: { requests: deleteRequests }
         }));
@@ -141,7 +142,7 @@ export class SheetManager {
    * @param {Object} position - Chart position
    */
   async createChart(sheetId, chartSpec, position) {
-    await callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
+    await this.apiClient.callWithRetry(() => this.sheets.spreadsheets.batchUpdate({
       spreadsheetId: this.spreadsheetId,
       resource: {
         requests: [{

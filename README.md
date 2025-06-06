@@ -1,47 +1,63 @@
 # Google Workspace Migration Analysis Tool
 
-This Node.js (ESM) project is designed for Google Workspace administrators to audit and analyze Google Workspace files (Docs, Sheets, Slides) across their domain. It scans files for links, compatibility issues, and metadata, and outputs results to a Google Sheet or JSON file for further analysis.
+This comprehensive Node.js (ESM) project is designed for Google Workspace administrators to perform deep audits and migration analysis of Google Workspace environments. **By default, it runs all analysis types** to provide complete visibility into files, sharing patterns, drive structures, calendars, and migration readiness across your domain.
 
-**🚀 NEW: Enhanced Migration Analysis Features**
-- **File Sharing Analysis**: Identifies external shares, public links, and cross-tenant permissions
-- **Drive Location Detection**: Distinguishes personal drives vs shared drives and folder structures  
-- **Calendar Migration Planning**: Scans future events, recurring meetings, and external attendees
-- **Migration Risk Assessment**: Automatically categorizes files and events by migration complexity
+**🚀 Comprehensive Analysis Features (All Enabled by Default)**
+- **File & Document Analysis**: Complete scanning of Google Docs, Sheets, and Slides with link extraction and compatibility assessment
+- **Sharing & Permission Analysis**: Identifies external shares, public links, cross-tenant permissions, and security risks
+- **Drive Structure Analysis**: Maps personal drives, shared drives, folder structures, and orphaned content
+- **Calendar Migration Planning**: Analyses future events, recurring meetings, external dependencies, and meeting resources
+- **Migration Risk Assessment**: Automatically categorises all content by migration complexity and security risk
+- **Modern CLI Interface**: User-friendly command-line with abbreviations, flexible disable options, and comprehensive help
+
+**🎯 Perfect for Migration Planning**: Whether moving to Microsoft 365, another Google Workspace tenant, or conducting security audits, this tool provides the complete picture of your workspace dependencies and migration challenges.
 
 ## Features
-- **Comprehensive File Scanning**: Scans Google Docs, Sheets, and Slides for all users in your domain.
-- **Link Extraction**: Identifies and lists links to other Workspace files, including hyperlinks, embedded object links, and formula references.
-- **Google Sheets Compatibility Analysis**: Detects Google Workspace-specific functions in Sheets that may cause compatibility issues with other platforms.
-- **🆕 Migration Analysis**: 
-  - **File Sharing Analysis**: Detects external shares, public links, domain-wide sharing, and cross-tenant permissions
-  - **Drive Location Detection**: Identifies personal drives vs shared drives, folder structures, and orphaned files
-  - **Migration Risk Assessment**: Automatically categorizes files by migration complexity (low/medium/high)
-- **🆕 Calendar Migration Planning**:
-  - **Future Events Analysis**: Scans upcoming events and recurring meetings
-  - **External Dependencies**: Identifies external attendees and cross-tenant meetings
-  - **Meeting Room Resources**: Detects Google Workspace meeting room bookings
-  - **Migration Complexity Assessment**: Categorizes events by migration difficulty
-- **🆕 Drive Analysis**: 
-  - **My Drive Analysis**: Scans user's personal Drive for file counts, sharing patterns, and storage usage
-  - **Shared Drive Discovery**: Identifies all Shared Drives accessible to users
-  - **External User Detection**: Finds users outside your domain with access to drives and files
-  - **Orphaned File Identification**: Discovers files without proper folder organization
-  - **Drive Member Analysis**: Analyzes Shared Drive membership and roles
-  - **Risk Assessment**: Categorizes drives by security and migration risk levels
-- **🆕 Comprehensive External Sharing Analysis**:
-  - **Cross-Domain Sharing**: Identifies files and drives shared with external domains
-  - **Public Link Detection**: Finds files with public or "anyone with link" access
-  - **Drive-Level Permissions**: Analyzes Shared Drive member permissions and restrictions
-- **Streaming-First Architecture**: Always creates streaming logs during scan for real-time monitoring and data safety.
-- **Flexible Output Options**:
-  - **Streaming Logs**: Always created (JSONL format) and automatically cleaned up after processing.
-  - **Google Sheets**: Optional export directly to a specified Google Sheet with detailed tabs.
-  - **JSON File**: Optional consolidated JSON export with overwrite or append modes.
-- **Batch Processing**: Processes users and files in batches to optimize API usage and avoid quota limits.
-- **Error Handling and Retry Logic**: Implements exponential backoff for API retries and logs detailed error messages for debugging.
-- **CLI Argument Validation**: Ensures correctness of all CLI arguments before execution.
-- **Environment Variable Validation**: Verifies that all required environment variables are set before running the script.
-- **Modular Design**: Organized into reusable modules for API calls, link extraction, and Google Sheets operations.
+
+### Core Analysis Capabilities (All Enabled by Default)
+- **Comprehensive File Scanning**: Scans Google Docs, Sheets, and Slides for all users in your domain
+- **Link Extraction**: Identifies and lists links to other Workspace files, including hyperlinks, embedded objects, and formula references
+- **Google Sheets Compatibility Analysis**: Detects Google Workspace-specific functions that may cause compatibility issues
+- **File Sharing Analysis**: 
+  - Detects external shares, public links, domain-wide sharing, and cross-tenant permissions
+  - Identifies security risks and sharing complexity patterns
+  - Maps external domain dependencies and access patterns
+- **Drive Structure Analysis**: 
+  - Distinguishes personal drives vs shared drives and folder structures
+  - Identifies orphaned files without proper folder organisation
+  - Maps drive ownership and access patterns
+  - Analyses Shared Drive membership, roles, and permissions
+- **Calendar Migration Planning**:
+  - Scans future events and recurring meetings (up to 2 years ahead)
+  - Identifies external attendees and cross-tenant meeting dependencies
+  - Detects Google Meet integration and meeting room resource bookings
+  - Categorises events by migration complexity
+- **Migration Risk Assessment**: 
+  - Automatically categorises all content by migration complexity (low/medium/high/critical)
+  - Identifies potential blockers and security concerns
+  - Provides actionable insights for migration planning
+
+### Modern CLI Interface
+- **All Scans Enabled by Default**: Runs comprehensive analysis without requiring configuration
+- **Argument Abbreviations**: Use `-u` for users, `-t` for types, `-j` for JSON output, etc.
+- **Flexible Disable Options**: Use `--no sharing,drive,calendars` to disable specific features
+- **Legacy Support**: Maintains compatibility with older `--no-<option>` flag syntax
+- **Smart Validation**: Validates all arguments and environment variables before execution
+
+### Output & Export Options
+- **Streaming-First Architecture**: Always creates streaming logs during scan for real-time monitoring and data safety
+- **Multiple Export Formats**:
+  - **Streaming Logs**: Always created (JSONL format) and automatically cleaned up after processing
+  - **Google Sheets**: Optional export directly to a specified Google Sheet with detailed tabs
+  - **JSON File**: Optional consolidated JSON export with overwrite or append modes
+- **Flexible Output Control**: Export to one or multiple formats simultaneously
+
+### Performance & Reliability
+- **Batch Processing**: Processes users and files in batches to optimise API usage and avoid quota limits
+- **Error Handling and Retry Logic**: Implements exponential backoff for API retries and detailed error logging
+- **Bandwidth Efficient**: Uses structured API calls instead of downloading actual files
+- **Data Transfer Monitoring**: Tracks and reports API usage and bandwidth consumption
+- **Modular Design**: Organised into reusable modules for maintainability and extensibility
 
 ## Additional Features
 
@@ -206,16 +222,20 @@ consolidated-output.json # Final traditional JSON format
 
 ### Basic Usage
 ```bash
-# Run a full scan of all users (streaming logs only)
+# Run a comprehensive scan of all users (all features enabled by default)
 npm start
 # or
 node index.js
 
-# Run a full scan and export to Google Sheets  
+# Comprehensive scan and export to Google Sheets  
 node index.js --sheets-output
+# or using abbreviation
+node index.js -s
 
 # Show help and available options
 node index.js --help
+# or using abbreviation  
+node index.js -h
 ```
 
 ### Command Line Options
@@ -224,93 +244,135 @@ node index.js --help
 node index.js [options]
 ```
 
-**Available Options:**
-- `--users <emails>` - Comma-separated list of user emails to scan (optional)
-- `--types <types>` - Comma-separated list of file types: doc,sheet,slide (optional)  
-- `--file <fileId>` - Scan a single file by its ID (optional)
-- `--json-output <path>` - Export consolidated JSON file (optional - streaming logs always created)
+**🆕 All scans are enabled by default for comprehensive analysis.** Use options to filter, export, or disable specific features.
+
+**Core Options:**
+- `-h, --help` - Show help message
+- `-u, --users <emails>` - Comma-separated list of user emails to scan (default: all users)
+- `-t, --types <types>` - Comma-separated list of file types: doc,sheet,slide (default: all types)  
+- `-f, --file <fileId>` - Scan a single file by its ID (disables other scans)
+- `-j, --json-output <path>` - Export consolidated JSON file (default: streaming logs only)
 - `--json-output-mode <mode>` - JSON export mode: overwrite|append (default: overwrite)
-- `--sheets-output` - Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
-- `--help, -h` - Show help message
+- `-s, --sheets-output` - Export to Google Sheets (requires OUTPUT_SHEET_ID env var)
+
+**Disable Options:**
+- `--no <features>` - Disable specific features (comma-separated list)
+  
+  Available features for `--no`:
+  - `sharing-analysis` (or `sharing`) - File sharing and permission analysis
+  - `drive-analysis` (or `drive`) - Drive analysis  
+  - `calendars` (or `include-calendars`) - Calendar analysis
+  - `shared-drives` (or `include-shared-drives`) - Shared Drive analysis
+  - `drive-members` (or `include-drive-members`) - Drive member analysis
+
+**Legacy Options (still supported):**
+- `--no-sharing-analysis` - Disable file sharing and permission analysis
+- `--no-drive-analysis` - Disable Drive analysis  
+- `--no-include-calendars` - Disable calendar analysis
+- `--no-include-shared-drives` - Disable Shared Drive analysis
+- `--no-include-drive-members` - Disable Drive member analysis
 
 **Important Notes:**
+- **All scan types are enabled by default** for comprehensive workspace analysis
+- **Use abbreviations** for faster command entry (e.g., `-u` instead of `--users`)
 - **Streaming logs are always created** during the scan (`scan-log.jsonl`, `summary-log.jsonl`) for real-time monitoring
 - **Streaming logs are automatically cleaned up** after processing completes
-- **`--json-output` is only needed** if you want a consolidated JSON file in addition to the streaming logs
-- **`--sheets-output` is only needed** if you want to export results to Google Sheets
+- **`-j/--json-output` is only needed** if you want a consolidated JSON file in addition to the streaming logs
+- **`-s/--sheets-output` is only needed** if you want to export results to Google Sheets
 
 ### Examples
 
 ```bash
-# Scan all users (streaming logs only)
+# Comprehensive scan with all features enabled (default behavior)
 node index.js
 
-# Scan all users and export to Google Sheets
-node index.js --sheets-output
+# Comprehensive scan and export to Google Sheets
+node index.js -s
 
-# Scan specific user only
-node index.js --users alice@domain.com
+# Scan specific user with all features 
+node index.js -u alice@domain.com
 
-# Scan multiple users and export to Google Sheets
-node index.js --users alice@domain.com,bob@domain.com --sheets-output
+# Scan multiple users with all features and export to Google Sheets
+node index.js -u alice@domain.com,bob@domain.com -s
 
-# Scan only specific file types
-node index.js --types sheet,doc
+# Scan only specific file types (all other features still enabled)
+node index.js -t sheet,doc
 
-# Scan specific user for only Google Sheets and export consolidated JSON
-node index.js --users alice@domain.com --types sheet --json-output ./results.json
+# Scan specific user for only Google Sheets, export consolidated JSON
+node index.js -u alice@domain.com -t sheet -j ./results.json
 
-# Scan a single file by ID
-node index.js --file 1abc...xyz
+# Scan a single file by ID (disables other scans)
+node index.js -f 1abc...xyz
 
 # Export consolidated JSON file (in addition to streaming logs)
-node index.js --json-output ./results.json
+node index.js -j ./results.json
 
 # Export consolidated JSON and append to existing file
-node index.js --json-output ./results.json --json-output-mode append
+node index.js -j ./results.json --json-output-mode append
 
 # Export to both Google Sheets and consolidated JSON
-node index.js --sheets-output --json-output ./results.json
+node index.js -s -j ./results.json
 
-# Combine multiple options
-node index.js --users alice@domain.com --types doc,sheet --sheets-output --json-output ./alice-scan.json
+# Disable specific features using the new --no flag
+node index.js --no sharing,drive
+
+# Disable multiple features with aliases
+node index.js --no sharing-analysis,calendars,shared-drives
+
+# Disable specific features while keeping others (legacy syntax still works)
+node index.js --no-sharing-analysis --no-drive-analysis
+
+# Scan specific users with only basic file analysis (disable enhanced features)
+node index.js -u alice@domain.com --no sharing,calendars,drive
+
+# Combine multiple options with abbreviations
+node index.js -u alice@domain.com -t doc,sheet -s -j ./alice-scan.json
 ```
 
 ### Migration Analysis Usage
 
-**🆕 Enhanced features for workspace migration planning:**
+**🆕 Migration analysis is now enabled by default** as part of the comprehensive scan. No additional flags needed unless you want to disable specific features.
 
 ```bash
-# Enable migration analysis for all files (sharing + location analysis)
-node index.js --migration-analysis
+# Comprehensive analysis (includes all migration features by default)
+node index.js
 
-# Include calendar analysis for migration planning  
-node index.js --include-calendars --users alice@domain.com
+# Comprehensive analysis exported to Google Sheets
+node index.js -s
 
-# Full migration analysis (files + calendars)
-node index.js --migration-analysis --include-calendars
+# Focus on specific users (all migration features included)
+node index.js -u alice@domain.com,bob@domain.com
 
-# Migration analysis for specific users only
-node index.js --migration-analysis --users alice@domain.com,bob@domain.com
+# Export consolidated JSON file
+node index.js -j migration-report.json
 
-# Export complete migration analysis to JSON
-node index.js --migration-analysis --include-calendars --json-output migration-report.json
+# Disable specific migration features using new --no flag
+node index.js --no sharing                    # Disable sharing analysis
+node index.js --no calendars                  # Disable calendar analysis  
+node index.js --no drive                      # Disable Drive analysis
+node index.js --no sharing,calendars,drive    # Disable multiple features
 
+# Legacy disable flags (still supported)
+node index.js --no-sharing-analysis  # Disable sharing analysis
+node index.js --no-include-calendars   # Disable calendar analysis  
+node index.js --no-drive-analysis      # Disable Drive analysis
+
+# Classic file-only scan (disable all enhanced features)
+node index.js --no sharing-analysis,calendars,drive-analysis
+
+```bash
 # Google Workspace to Microsoft 365 migration assessment
-node index.js --migration-analysis --include-calendars --users alice@domain.com --json-output m365-migration.json
+node index.js -u alice@domain.com -j m365-migration.json
 ```
 
-**Migration Analysis Features:**
-- `--migration-analysis` - Enables file sharing and location analysis for migration planning
-- `--include-calendars` - Adds calendar scanning for meeting dependencies and external attendees
-
-**Migration Analysis Output:**
-- **File Sharing Risks**: External shares, public links, cross-tenant permissions
-- **Location Complexity**: Personal drives, shared drives, folder depth analysis  
+**Migration Analysis Features (enabled by default):**
+- **File Sharing Analysis**: External shares, public links, cross-tenant permissions
+- **Drive Location Analysis**: Personal drives, shared drives, folder structures
 - **Calendar Dependencies**: Future events, recurring meetings, external attendees, meeting rooms
-- **Risk Assessment**: Automatic categorization by migration complexity (low/medium/high)
+- **Drive Analysis**: My Drive & Shared Drive scanning, external user detection, orphaned files
+- **Risk Assessment**: Automatic categorisation by migration complexity (low/medium/high)
 
-**Required Environment Variables for Migration Analysis:**
+**Required Environment Variables for Comprehensive Analysis:**
 ```bash
 PRIMARY_DOMAIN=yourdomain.com  # Your workspace domain for external share detection
 ```
@@ -321,22 +383,22 @@ PRIMARY_DOMAIN=yourdomain.com  # Your workspace domain for external share detect
 - **External Share Detection**: Identifies files shared with users outside your primary domain
 - **Public Link Detection**: Finds files with public or "anyone with link" sharing
 - **Cross-Tenant Analysis**: Maps sharing relationships across different Google Workspace tenants
-- **Permission Complexity Assessment**: Categorizes sharing by migration risk level
+- **Permission Complexity Assessment**: Categorises sharing by migration risk level
 - **Domain-Wide Sharing**: Identifies files shared with entire domains
 
 ### Drive Location Analysis  
 - **Personal vs Shared Drives**: Distinguishes between individual user drives and shared team drives
 - **Folder Structure Mapping**: Captures full folder paths for migration planning
-- **Orphaned File Detection**: Identifies files without proper folder organization
+- **Orphaned File Detection**: Identifies files without proper folder organisation
 - **Migration Complexity Scoring**: Assesses difficulty of moving files based on location and structure
 
 ### Calendar Migration Planning
-- **Future Events Scanning**: Analyzes upcoming events up to 2 years in advance
+- **Future Events Scanning**: Analyses upcoming events up to 2 years in advance
 - **Recurring Meeting Analysis**: Identifies complex recurring patterns that may need special handling
 - **External Attendee Detection**: Maps external meeting participants across domains
 - **Google Meet Integration**: Identifies meetings using Google Meet vs external platforms
 - **Meeting Room Resources**: Detects Google Workspace meeting room bookings
-- **Migration Risk Assessment**: Categorizes events by migration complexity
+- **Migration Risk Assessment**: Categorises events by migration complexity
 
 ### Migration Risk Categories
 - **Low Risk**: Simple files with minimal sharing, basic calendar events
@@ -346,55 +408,72 @@ PRIMARY_DOMAIN=yourdomain.com  # Your workspace domain for external share detect
 
 ## Usage Examples
 
-### Basic Migration Analysis
+### Basic Comprehensive Analysis
 ```bash
-# Enable migration analysis for all users
-node index.js --migration-analysis
+# Full workspace analysis (all features enabled by default)
+node index.js
 
-# Analyze specific users with calendar data
-node index.js --migration-analysis --include-calendars --users alice@domain.com,bob@domain.com
+# Export results to Google Sheets
+node index.js -s
 
-# Full migration assessment with JSON export
-node index.js --migration-analysis --include-calendars --json-output migration-report.json
+# Export results to JSON file
+node index.js -j workspace-analysis.json
+
+# Scan specific users with full analysis
+node index.js -u alice@domain.com,bob@domain.com
+
+# Scan specific file types only
+node index.js -t doc,sheet
 ```
 
-### Targeted Analysis
+### Selective Analysis
 ```bash
-# Analyze only Google Sheets for formula compatibility
-node index.js --migration-analysis --types sheet --json-output sheets-analysis.json
+# Disable calendar analysis using new --no flag
+node index.js --no calendars
 
-# Calendar-only analysis for meeting planning
-node index.js --include-calendars --users alice@domain.com --json-output calendar-analysis.json
+# Disable sharing and permission analysis
+node index.js --no sharing
 
-# Single file migration assessment
-node index.js --migration-analysis --file 1abc123def456ghi789
+# Disable multiple features at once
+node index.js --no sharing,calendars,drive
+
+# Basic file scan only (disable all enhanced features)
+node index.js --no sharing-analysis,calendars,drive-analysis
+
+# Focus on Drive analysis only
+node index.js --no sharing,calendars
+
+# Legacy syntax (still supported)
+node index.js --no-include-calendars
+node index.js --no-sharing-analysis
+node index.js --no-sharing-analysis --no-include-calendars
 ```
 
-### Export Options
+### Export and Output Options
 ```bash
-# Export to Google Sheets with migration data
-node index.js --migration-analysis --sheets-output
+# Export to both Sheets and JSON
+node index.js -s -j ./complete-analysis.json
 
-# Comprehensive report with all features
-node index.js --migration-analysis --include-calendars --sheets-output --json-output full-report.json
+# Append to existing JSON file
+node index.js -j ./existing-results.json --json-output-mode append
+
+# Single file analysis
+node index.js -f 1abc...xyz
 ```
 
-### Drive Analysis
+### Modern Disable Syntax Examples
 ```bash
-# Enable comprehensive Drive analysis
-node index.js --drive-analysis
+# Use new --no flag with feature names or aliases
+node index.js --no sharing                    # Disable sharing analysis
+node index.js --no drive                      # Disable drive analysis  
+node index.js --no calendars                  # Disable calendar analysis
+node index.js --no shared-drives              # Disable shared drive analysis
+node index.js --no drive-members              # Disable drive member analysis
 
-# Include Shared Drive analysis
-node index.js --drive-analysis --include-shared-drives
+# Disable multiple features at once
+node index.js --no sharing,drive,calendars    # Multiple features
+node index.js --no sharing-analysis,calendars # Mix full names and aliases
 
-# Include Drive member analysis
-node index.js --drive-analysis --include-shared-drives --include-drive-members
-
-# Combine with migration analysis for complete audit
-node index.js --migration-analysis --drive-analysis --include-shared-drives
-
-# Export Drive analysis to JSON
-node index.js --drive-analysis --json-output ./drive-audit.json
 ```
 
 ## Viewing Results

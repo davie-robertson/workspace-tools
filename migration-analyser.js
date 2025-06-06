@@ -3,29 +3,32 @@
  * Provides comprehensive migration analysis functionality following SOLID principles
  */
 
+import 'dotenv/config';
 import { CalendarScanner } from './calendar-scanner.js';
-import { analyzeFileSharing, analyzeFileLocation } from './file-scanners.js';
-import { getAuthenticatedClientForUser } from './API-Calls.js';
+import { analyseFileSharing, analyseFileLocation } from './file-scanners.js';
+import { apiClient } from './api-client.js';
+import { EnvironmentConfig, CONFIG } from './config.js';
 import { google } from 'googleapis';
 
 /**
- * Migration Analyzer class - handles all migration-related analysis
+ * Migration Analyser class - handles all migration-related analysis
  * Follows Single Responsibility Principle
  */
-export class MigrationAnalyzer {
+export class MigrationAnalyser {
   constructor(options = {}) {
     this.includeCalendars = options.includeCalendars || false;
-    this.primaryDomain = process.env.PRIMARY_DOMAIN;
+    this.primaryDomain = EnvironmentConfig.getInstance().primaryDomain;
+    this.apiClient = apiClient;
   }
 
   /**
    * Performs comprehensive migration analysis for a user
-   * @param {string} userEmail - User email to analyze
-   * @param {Array} files - User's files to analyze
+   * @param {string} userEmail - User email to analyse
+   * @param {Array} files - User's files to analyse
    * @param {Function} streamingLogger - Logger for real-time updates
    * @returns {Object} Complete migration analysis results
    */
-  async analyzeUser(userEmail, files, streamingLogger) {
+  async analyseUser(userEmail, files, streamingLogger) {
     const results = {
       userEmail,
       fileAnalysis: [],
@@ -45,20 +48,20 @@ export class MigrationAnalyzer {
 
     try {
       // Create user-specific authenticated clients
-      userAuth = await getAuthenticatedClientForUser(userEmail);
+      userAuth = await this.apiClient.createAuthenticatedClient(userEmail);
       userDrive = google.drive({ version: 'v3', auth: userAuth });
 
-      // Analyze files for migration issues
+      // Analyse files for migration issues
       console.log(`  Performing migration analysis for ${files.length} files...`);
       for (const file of files) {
-        const fileAnalysis = await this.analyzeFile(file, userDrive);
+        const fileAnalysis = await this.analyseFile(file, userDrive);
         results.fileAnalysis.push(fileAnalysis);
         this.updateMigrationSummary(results.migrationSummary, fileAnalysis);
       }
 
       // Perform calendar analysis if enabled
       if (this.includeCalendars) {
-        console.log(`  Analyzing calendars for migration planning...`);
+        console.log(`  Analysing calendars for migration planning...`);
         const calendarScanner = new CalendarScanner(userAuth);
         results.calendarAnalysis = await calendarScanner.scanUserCalendars(userEmail);
         
@@ -82,12 +85,12 @@ export class MigrationAnalyzer {
   }
 
   /**
-   * Analyzes a single file for migration issues
+   * Analyses a single file for migration issues
    * @param {Object} file - Google Drive file object
    * @param {Object} drive - Google Drive API client
    * @returns {Object} File migration analysis
    */
-  async analyzeFile(file, drive) {
+  async analyseFile(file, drive) {
     const analysis = {
       fileId: file.id,
       fileName: file.name,
@@ -99,11 +102,11 @@ export class MigrationAnalyzer {
     };
 
     try {
-      // Analyze sharing permissions
-      analysis.sharing = await analyzeFileSharing(file, drive);
+      // Analyse sharing permissions
+      analysis.sharing = await analyseFileSharing(file, drive);
       
-      // Analyze file location
-      analysis.location = await analyzeFileLocation(file, drive);
+      // Analyse file location
+      analysis.location = await analyseFileLocation(file, drive);
       
       // Assess overall migration risk
       analysis.overallRisk = this.assessOverallMigrationRisk(
@@ -116,7 +119,7 @@ export class MigrationAnalyzer {
       analysis.migrationIssues = this.identifyMigrationIssues(analysis);
 
     } catch (error) {
-      console.error(`Error analyzing file ${file.name}: ${error.message}`);
+      console.error(`Error analysing file ${file.name}: ${error.message}`);
       analysis.error = error.message;
     }
 
@@ -174,7 +177,7 @@ export class MigrationAnalyzer {
     }
 
     if (analysis.location?.isOrphan) {
-      issues.push('Orphaned file may be difficult to organize');
+      issues.push('Orphaned file may be difficult to organise');
     }
 
     if (analysis.sharing?.domainSharing) {
@@ -278,7 +281,7 @@ export class MigrationAnalyzer {
       });
     }
 
-    // Convert Set to Array for JSON serialization
+    // Convert Set to Array for JSON serialisation
     report.sharingAnalysis.uniqueExternalDomains = Array.from(report.sharingAnalysis.uniqueExternalDomains);
 
     // Generate recommendations
@@ -319,4 +322,4 @@ export class MigrationAnalyzer {
   }
 }
 
-export default MigrationAnalyzer;
+export default MigrationAnalyser;

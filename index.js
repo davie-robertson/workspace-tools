@@ -1,16 +1,11 @@
 import 'dotenv/config';
-import fs from 'fs'; // For writing JSON output
-import { google } from 'googleapis';
-import {
-  callWithRetry,
-  getAuthenticatedClient,
-  getAuthenticatedClientForUser,
-  getUserQuotaInfo,
-} from './API-Calls.js';
+import fs from 'fs';
+import { EnvironmentConfig, FeatureConfig, CONFIG } from './config.js';
+import { apiClient, adminApiClient } from './api-client.js';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
 import {
   streamingLogger,
-  initializeStreamingLogs,
+  initialiseStreamingLogs,
 } from './streaming-logger.js';
 import {
   findLinksInDoc,
@@ -18,13 +13,19 @@ import {
   findLinksInSlide,
 } from './file-scanners.js';
 import { getAllUsers, listUserFiles } from './user-file-management.js';
-import { getFileType, cleanupStreamingLogs } from './utils.js';
+import {
+  FileTypeUtils,
+  StreamingLogUtils,
+  StringUtils,
+  ArrayUtils,
+} from './utils.js';
 import { parseArgs, validateArgs, showHelp } from './cli.js';
 import { CalendarScanner } from './calendar-scanner.js';
-import { MigrationAnalyzer } from './migration-analyzer.js';
-import { DriveAnalyzer } from './drive-analyzer.js';
+import { MigrationAnalyser } from './migration-analyser.js';
+import { DriveAnalyser } from './drive-analyser.js';
+import { google } from 'googleapis';
 
-// Parse the command line arguments
+// Parse and validate command line arguments
 const argv = parseArgs();
 
 // Check for help argument
@@ -41,788 +42,760 @@ try {
   process.exit(1);
 }
 
-// Process --users argument: split by comma, trim whitespace, convert to lowercase.
-// If not provided, filterUsers will be null (scan all users, unless singleFileId is given).
-const filterUsers = argv.users
-  ? argv.users.split(',').map((u) => u.trim().toLowerCase())
+// Initialise configuration
+const envConfig = EnvironmentConfig.getInstance();
+const featureConfig = new FeatureConfig(argv);
+
+// Process CLI arguments with consistent naming
+const userFilters = argv.users
+  ? argv.users.split(',').map(StringUtils.normaliseEmail)
   : null;
-// Process --types argument: split by comma, trim whitespace, convert to lowercase.
-// If not provided, filterTypes will be null (scan all supported file types).
-const filterTypes = argv.types
-  ? argv.types.split(',').map((t) => t.trim().toLowerCase())
+
+const fileTypeFilters = argv.types
+  ? argv.types.split(',').map((type) => type.trim().toLowerCase())
   : null;
-// Process --file argument: specifies a single file ID to scan.
+
 const singleFileId = argv.file;
-// Process --json-output argument: specifies the path for the JSON output file.
-export const jsonOutputFilePath = argv['json-output']; // Matches the new argument name
-// Process --json-output-mode argument: 'overwrite' or 'append'.
-const jsonOutputMode = argv['json-output-mode'] || 'overwrite'; // Default to 'overwrite'
-// Process --sheets-output flag: determines if Google Sheets output should be generated
-const sheetsOutput = argv['sheets-output'] || false;
-// Process --include-calendars flag: determines if calendar analysis should be included
-const includeCalendars = argv['include-calendars'] || false;
-// Process --migration-analysis flag: enables enhanced migration analysis features
-const migrationAnalysis = argv['migration-analysis'] || false;
-// Process --drive-analysis flag: enables comprehensive Drive analysis
-const driveAnalysis = argv['drive-analysis'] || false;
-// Process --include-shared-drives flag: includes Shared Drive analysis (requires --drive-analysis)
-const includeSharedDrives = argv['include-shared-drives'] || false;
-// Process --include-drive-members flag: includes Drive member analysis (requires --drive-analysis)
-const includeDriveMembers = argv['include-drive-members'] || false;
+const jsonOutputFilePath = argv['json-output'];
+const jsonOutputMode = argv['json-output-mode'] || 'overwrite';
+const enableSheetsOutput = argv['sheets-output'] || false;
 
-// --- ENVIRONMENT VARIABLES ---
-// SECURITY: ADMIN_USER is critical as it defines the user context for Google Workspace Admin SDK calls.
-// This user MUST have necessary administrative privileges.
-export const ADMIN_USER = process.env.ADMIN_USER;
-// SECURITY: OUTPUT_SHEET_ID is the ID of the Google Sheet where results are written.
-// Only required if --sheets-output flag is used.
-const OUTPUT_SHEET_ID = process.env.OUTPUT_SHEET_ID;
+// Export for other modules
+export const ADMIN_USER = envConfig.adminUser;
 
-// Validate that essential environment variables are set.
-if (!ADMIN_USER) {
-  console.error(
-    "Missing required environment variable: ADMIN_USER. This user account is used to impersonate and access other users' Drive data and list users via the Admin SDK."
-  );
+// Validate environment configuration
+try {
+  envConfig.validateRequired();
+
+  // Validate additional requirements based on features
+  if (
+    featureConfig
+      .getEnabledFeatures()
+      .some((f) =>
+        ['sharingAnalysis', 'driveAnalysis', 'calendars'].includes(f)
+      )
+  ) {
+    envConfig.validateForAnalysis();
+  }
+
+  if (enableSheetsOutput) {
+    envConfig.validateForSheetsOutput();
+  }
+} catch (error) {
+  console.error(`Configuration Error: ${error.message}`);
   process.exit(1);
 }
 
-// Validate PRIMARY_DOMAIN if migration analysis or drive analysis is enabled
-if ((migrationAnalysis || includeCalendars || driveAnalysis) && !process.env.PRIMARY_DOMAIN) {
-  console.error(
-    'Missing required environment variable: PRIMARY_DOMAIN. This is needed for migration analysis and drive analysis to identify external sharing and cross-tenant dependencies. Please set PRIMARY_DOMAIN in your .env file (e.g., PRIMARY_DOMAIN=yourdomain.com)'
-  );
-  process.exit(1);
-}
+// Initialise global state
+const totalStats = {
+  doc: 0,
+  sheet: 0,
+  slide: 0,
+  other: 0,
+  docWithLinks: 0,
+  sheetWithLinks: 0,
+  slideWithLinks: 0,
+  sheetWithIncompatibleFunctions: 0,
+};
 
-// Validate Google Sheets configuration if requested
-if (sheetsOutput && !OUTPUT_SHEET_ID) {
-  console.error(
-    'Google Sheets output requested (--sheets-output) but OUTPUT_SHEET_ID environment variable is not set. Please set OUTPUT_SHEET_ID in your .env file or remove the --sheets-output flag.'
-  );
-  process.exit(1);
-}
-// SECURITY: GOOGLE_APPLICATION_CREDENTIALS points to the service account key file.
-// This file contains sensitive credentials. Protect it accordingly (e.g., file permissions, .gitignore).
-// The service account needs domain-wide delegation enabled and the necessary OAuth scopes granted.
-if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-  console.error(
-    'Missing GOOGLE_APPLICATION_CREDENTIALS environment variable. This should be the path to your service account JSON key file. This key is used for authentication with Google APIs.'
-  );
-  process.exit(1);
-}
+const userStats = {};
+const allFilesData = [];
+const allMigrationResults = [];
+const allDriveResults = [];
 
-// --- MAIN LOGIC ---
-// The main function orchestrates the entire audit process.
+/**
+ * Main application logic
+ */
 async function main() {
   try {
-    // Initialize streaming logs for the scan
-    initializeStreamingLogs();
+    // Initialise streaming logs for the scan
+    initialiseStreamingLogs();
 
-    const auth = await getAuthenticatedClient();
-    const admin = google.admin({ version: 'directory_v1', auth });
-    const drive = google.drive({ version: 'v3', auth });
-    const docs = google.docs({ version: 'v1', auth });
-    const sheets = google.sheets({ version: 'v4', auth });
-    const slides = google.slides({ version: 'v1', auth });
+    // Determine users to scan based on CLI arguments
+    const usersToScan = await determineUsersToScan();
 
-    // Determine users to scan based on CLI arguments.
-    // This logic handles different scenarios: single file scan, user-filtered scan, or full domain scan.
-    let usersToScan = [];
-    // Determine the list of users to scan.
-    // If a singleFileId is provided and specific users are filtered, use those users.
-    // This allows scanning a specific file in the context of a particular user (e.g., for permissions).
-    if (singleFileId && filterUsers && filterUsers.length > 0) {
-      usersToScan = filterUsers.map((email) => ({
-        primaryEmail: email.toLowerCase(),
-      }));
-      console.log(
-        `Targeting specific users for single file scan: ${filterUsers.join(
-          ', '
-        )}`
-      );
-    } else if (!singleFileId) {
-      // If not a single file scan, fetch all non-suspended, non-archived users from the domain.
-      // If filterUsers is set, filter this list.
-      const allUsers = await getAllUsers(admin);
-      usersToScan = filterUsers
-        ? allUsers.filter((user) =>
-            filterUsers.includes(user.primaryEmail.toLowerCase())
-          )
-        : allUsers;
-      console.log(
-        `Found ${allUsers.length} total users. Will scan ${usersToScan.length} users.`
-      );
-    } else {
-      // Single file scan without user filter - need to fetch all users to find file owner
-      const allUsers = await getAllUsers(admin);
+    console.log(
+      `Will scan ${usersToScan.length} users with features: ${featureConfig
+        .getEnabledFeatures()
+        .join(', ')}`
+    );
 
-      if (filterUsers && filterUsers.length > 0) {
-        // If specific users are filtered, use only those users
-        usersToScan = filterUsers.map((email) => ({
-          primaryEmail: email,
-        }));
-        console.log(
-          `Single file scan with user filter. Will check ${usersToScan.length} users.`
-        );
-      } else {
-        // No user filter specified - need to scan all users to find file owner
-        usersToScan = allUsers
-          ? allUsers.filter((user) => user.primaryEmail)
-          : [];
-        console.log(
-          `Single file scan with no user filter. Will check all ${usersToScan.length} users to find file owner.`
-        );
-      }
-    }
+    // Initialise analysers based on enabled features
+    const analysers = initialiseAnalysers();
 
-    // Initialize arrays and objects to store scan results.
-    const allFilesData = []; // Stores detailed data for each file found with links/issues.
-    let allMigrationResults = []; // For migration analysis results
-    let allDriveResults = []; // For drive analysis results
-
-    // Initialize statistics objects.
-    const userStats = {}; // Per-user statistics.
-    const totalStats = {
-      // Overall statistics.
-      doc: 0,
-      sheet: 0,
-      slide: 0,
-      other: 0, // Count of files not Docs, Sheets, or Slides
-      docWithLinks: 0,
-      sheetWithLinks: 0,
-      slideWithLinks: 0,
-      otherWithLinks: 0, // Currently not populated, consider if needed
-      sheetWithIncompatibleFunctions: 0,
-    };
-
-    // Prepare output: Confirm JSON output path if provided.
-    // Google Sheets will be generated from streaming logs after scanning is complete.
-    if (jsonOutputFilePath) {
-      console.log(`JSON output will be written to: ${jsonOutputFilePath}`);
-    }
-
-    // --- SINGLE FILE SCAN LOGIC ---
-    // Handles the case where the --file <ID> argument is provided.
-    // Scans only the specified file, not iterating through users' drives.
+    // Handle single file scan or multi-user scan
     if (singleFileId) {
-      // SECURITY: Check if the single file ID is the same as the output sheet ID.
-      // If so, skip scanning to prevent accidental modification or infinite loops if script writes to it.
-      if (singleFileId === OUTPUT_SHEET_ID) {
-        console.warn(
-          `Skipping scan of OUTPUT_SHEET_ID (${OUTPUT_SHEET_ID}) to prevent conflicts.`
-        );
-        // Consider if an exit or different handling is needed here. For now, it just skips.
-      } else {
-        console.log(`Fetching metadata for single file ${singleFileId}...`);
-        let fileMetadata;
-        let contextUserEmail;
-
-        // Try to find which user owns this file by attempting to access it as each user
-        let foundOwner = false;
-        for (const user of usersToScan) {
-          try {
-            const userAuthClient = await getAuthenticatedClientForUser(
-              user.primaryEmail
-            );
-            const userDrive = google.drive({
-              version: 'v3',
-              auth: userAuthClient,
-            });
-
-            fileMetadata = await callWithRetry(() =>
-              userDrive.files.get({
-                fileId: singleFileId,
-                fields:
-                  'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
-                supportsAllDrives: true,
-              })
-            );
-
-            // Track file metadata retrieval
-            dataTransferMonitor.trackFileMetadata(
-              singleFileId,
-              fileMetadata.data
-            );
-
-            contextUserEmail = user.primaryEmail;
-            foundOwner = true;
-            console.log(
-              `File ${singleFileId} found in ${contextUserEmail}'s accessible files.`
-            );
-            break;
-          } catch (e) {
-            // File not accessible by this user, try next user
-            continue;
-          }
-        }
-
-        if (!foundOwner) {
-          console.error(
-            `File ${singleFileId} not found or not accessible by any user in the domain.`
-          );
-          throw new Error(`File ${singleFileId} not accessible`);
-        }
-
-        // Get quota information for the context user
-        console.log(`Getting quota information for ${contextUserEmail}...`);
-        const contextUserQuotaInfo = await getUserQuotaInfo(contextUserEmail);
-
-        // Initialize userStats for the context user if not already present
-        if (!userStats[contextUserEmail]) {
-          userStats[contextUserEmail] = {
-            doc: 0,
-            sheet: 0,
-            slide: 0,
-            other: 0,
-            docWithLinks: 0,
-            sheetWithLinks: 0,
-            slideWithLinks: 0,
-            otherWithLinks: 0,
-            sheetWithIncompatibleFunctions: 0,
-            quotaInfo: contextUserQuotaInfo,
-          };
-        }
-
-        let links = [];
-        let incompatibleFunctions = [];
-        const fileType = getFileType(fileMetadata.data.mimeType);
-        console.log(
-          `Scanning single file: ${fileMetadata.data.name} (${fileType})`
-        );
-
-        try {
-          switch (fileMetadata.data.mimeType) {
-            case 'application/vnd.google-apps.document':
-              links = await findLinksInDoc(singleFileId, contextUserEmail);
-              break;
-            case 'application/vnd.google-apps.spreadsheet':
-              const sheetData = await findLinksInSheet(
-                singleFileId,
-                contextUserEmail
-              );
-              links = sheetData.links;
-              incompatibleFunctions = sheetData.incompatibleFunctions;
-              break;
-            case 'application/vnd.google-apps.presentation':
-              links = await findLinksInSlide(singleFileId, contextUserEmail);
-              break;
-            default:
-              console.log(
-                `File type ${fileMetadata.data.mimeType} is not scannable for links.`
-              );
-          }
-        } catch (e) {
-          console.error(
-            `Error scanning file ${singleFileId} (${fileMetadata.data.name}): ${e.message}`
-          );
-          console.error(`Detailed error scanning file:`, e);
-        }
-
-        const owner =
-          fileMetadata.data.owners?.[0]?.emailAddress || 'Unknown Owner';
-        const fileData = {
-          ownerEmail: owner,
-          fileName: fileMetadata.data.name,
-          createdTime: fileMetadata.data.createdTime,
-          modifiedTime: fileMetadata.data.modifiedTime,
-          size: fileMetadata.data.size,
-          fileId: fileMetadata.data.id,
-          fileType: fileType,
-          fileUrl: fileMetadata.data.webViewLink,
-          linkedItems: links,
-        };
-        if (
-          fileMetadata.data.mimeType ===
-          'application/vnd.google-apps.spreadsheet'
-        ) {
-          fileData.incompatibleFunctions = incompatibleFunctions;
-        }
-        allFilesData.push(fileData);
-
-        // Stream file data for single file scan
-        streamingLogger.logFile(fileData);
-
-        if (jsonOutputFilePath) {
-          // JSON output handled after main loop.
-        } else if (OUTPUT_SHEET_ID) {
-          // Legacy row data structure no longer used - sheets built from streaming logs
-          // Note: rowsForSheet removed - sheets are now built from streaming logs
-        }
-        console.log(
-          `Single file scan complete for ${fileMetadata.data.name}. Found ${links.length} links/references.` +
-            (incompatibleFunctions.length > 0
-              ? ` ${incompatibleFunctions.length} incompatible functions.`
-              : '')
-        );
-      }
+      await processSingleFile(usersToScan, analysers);
     } else {
-      // --- MULTI-FILE SCAN LOGIC (Iterate through users) ---
-      // Initialize migration analyzer if needed
-      let migrationAnalyzer = null;
-      
-      if (migrationAnalysis || includeCalendars) {
-        migrationAnalyzer = new MigrationAnalyzer({
-          includeCalendars: includeCalendars
-        });
-      }
-
-      // Initialize Drive analyzer if needed
-      let driveAnalyzer = null;
-      
-      if (driveAnalysis) {
-        driveAnalyzer = new DriveAnalyzer({
-          includeSharedDrives: includeSharedDrives,
-          includeMembers: includeDriveMembers,
-          includeExternalSharing: true
-        });
-      }
-
-      for (const [idx, user] of usersToScan.entries()) {
-        const userEmail = user.primaryEmail;
-        console.log(
-          `Scanning files for user ${userEmail} (${idx + 1} of ${
-            usersToScan.length
-          })`
-        );
-
-        // Stream user processing start
-        streamingLogger.logUserStart(userEmail, idx, usersToScan.length);
-
-        let files = await listUserFiles(userEmail);
-        console.log(
-          `User ${userEmail}: Found ${files.length} files. Analyzing...`
-        );
-
-        // Get user quota information
-        console.log(`Getting quota information for ${userEmail}...`);
-        const userQuotaInfo = await getUserQuotaInfo(userEmail);
-
-        // Stream quota data
-        streamingLogger.logQuota(userEmail, userQuotaInfo);
-
-        // Perform migration analysis if enabled
-        let migrationResults = null;
-        if (migrationAnalyzer) {
-          migrationResults = await migrationAnalyzer.analyzeUser(userEmail, files, streamingLogger);
-          allMigrationResults.push(migrationResults);
-        }
-
-        // Perform Drive analysis if enabled
-        let driveResults = null;
-        if (driveAnalyzer) {
-          console.log(`Analyzing drives for ${userEmail}...`);
-          driveResults = await driveAnalyzer.analyzeUserDrives(userEmail, streamingLogger);
-          allDriveResults.push(driveResults);
-          
-          // Log detailed Drive analysis
-          streamingLogger.logDriveAnalysis(userEmail, driveResults);
-        }
-
-        userStats[userEmail] = {
-          doc: 0,
-          sheet: 0,
-          slide: 0,
-          other: 0,
-          docWithLinks: 0,
-          sheetWithLinks: 0,
-          slideWithLinks: 0,
-          otherWithLinks: 0, // Currently not populated, consider if needed
-          sheetWithIncompatibleFunctions: 0,
-          quotaInfo: userQuotaInfo,
-        };
-
-        if (filterTypes) {
-          files = files.filter((file) => {
-            const fileTypeSimple = getFileType(file.mimeType)
-              .toLowerCase()
-              .replace('google ', '');
-            return filterTypes.includes(fileTypeSimple);
-          });
-          console.log(
-            `Filtered to ${files.length} files based on specified types for ${userEmail}.`
-          );
-        }
-
-        for (const [fileIdx, file] of files.entries()) {
-          if (file.id === OUTPUT_SHEET_ID) {
-            console.warn(
-              `Skipping scan of OUTPUT_SHEET_ID (${file.id}) found in ${userEmail}'s files.`
-            );
-            continue;
-          }
-
-          console.log(
-            `user ${userEmail} : Scanning file (${fileIdx + 1} of ${
-              files.length
-            })`
-          );
-
-          const fileType = getFileType(file.mimeType);
-          let links = [];
-          let incompatibleFunctions = [];
-
-          switch (fileType) {
-            case 'Google Doc':
-              totalStats.doc++;
-              userStats[userEmail].doc++;
-              try {
-                links = await findLinksInDoc(file.id, userEmail);
-              } catch (error) {
-                console.error(
-                  `Error scanning Google Doc ${file.name}: ${error.message}`
-                );
-              }
-              break;
-
-            case 'Google Sheet':
-              totalStats.sheet++;
-              userStats[userEmail].sheet++;
-              try {
-                const sheetData = await findLinksInSheet(file.id, userEmail);
-                links = sheetData.links;
-                incompatibleFunctions = sheetData.incompatibleFunctions;
-              } catch (error) {
-                console.error(
-                  `Error scanning Google Sheet ${file.name}: ${error.message}`
-                );
-              }
-              break;
-
-            case 'Google Slide':
-              totalStats.slide++;
-              userStats[userEmail].slide++;
-              try {
-                links = await findLinksInSlide(file.id, userEmail);
-              } catch (error) {
-                console.error(
-                  `Error scanning Google Slide ${file.name}: ${error.message}`
-                );
-              }
-              break;
-
-            default:
-              totalStats.other++;
-              userStats[userEmail].other++;
-              console.log(`File type ${fileType} is not scannable for links.`);
-          }
-
-          if (links.length > 0) {
-            switch (fileType) {
-              case 'Google Doc':
-                totalStats.docWithLinks++;
-                userStats[userEmail].docWithLinks++;
-                break;
-              case 'Google Sheet':
-                totalStats.sheetWithLinks++;
-                userStats[userEmail].sheetWithLinks++;
-                break;
-              case 'Google Slide':
-                totalStats.slideWithLinks++;
-                userStats[userEmail].slideWithLinks++;
-                break;
-            }
-          }
-          if (incompatibleFunctions.length > 0 && fileType === 'Google Sheet') {
-            totalStats.sheetWithIncompatibleFunctions++;
-            userStats[userEmail].sheetWithIncompatibleFunctions++;
-          }
-
-          // Create file data for all scanned files
-          const fileData = {
-            ownerEmail: userEmail,
-            fileName: file.name,
-            createdTime: file.createdTime,
-            modifiedTime: file.modifiedTime,
-            size: file.size,
-            fileId: file.id,
-            fileType: fileType,
-            fileUrl: file.webViewLink,
-            linkedItems: links,
-          };
-          
-          if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
-            fileData.incompatibleFunctions = incompatibleFunctions;
-          }
-
-          // Add migration analysis data if available
-          if (migrationResults) {
-            const fileMigrationData = migrationResults.fileAnalysis.find(f => f.fileId === file.id);
-            if (fileMigrationData) {
-              fileData.migrationAnalysis = {
-                sharing: fileMigrationData.sharing,
-                location: fileMigrationData.location,
-                overallRisk: fileMigrationData.overallRisk,
-                migrationIssues: fileMigrationData.migrationIssues
-              };
-            }
-          }
-
-          allFilesData.push(fileData);
-
-          // Stream file data immediately (for all files, not just those with issues)
-          streamingLogger.logFile(fileData);
-
-          if (!jsonOutputFilePath && OUTPUT_SHEET_ID) {
-            // Legacy row data structure no longer used - sheets built from streaming logs
-            // Note: rowsForSheet removed - sheets are now built from streaming logs
-          }
-        }
-
-        // Add migration analysis to user stats if performed
-        if (migrationResults) {
-          userStats[userEmail].migrationAnalysis = {
-            totalFiles: migrationResults.migrationSummary.totalFiles,
-            highRiskFiles: migrationResults.migrationSummary.highRiskFiles,
-            mediumRiskFiles: migrationResults.migrationSummary.mediumRiskFiles,
-            lowRiskFiles: migrationResults.migrationSummary.lowRiskFiles,
-            externalShares: migrationResults.migrationSummary.externalShares,
-            publicFiles: migrationResults.migrationSummary.publicFiles
-          };
-
-          if (migrationResults.calendarAnalysis) {
-            userStats[userEmail].calendarAnalysis = {
-              totalCalendars: migrationResults.calendarAnalysis.calendars.length,
-              futureEvents: migrationResults.calendarAnalysis.futureEvents.length,
-              recurringEvents: migrationResults.calendarAnalysis.recurringEvents.length,
-              externalMeetings: migrationResults.calendarAnalysis.externalAttendees.length,
-              migrationRisks: migrationResults.calendarAnalysis.migrationRisks,
-              calendarDisabled: migrationResults.calendarAnalysis.calendarDisabled || false
-            };
-          }
-        }
-
-        // Add Drive analysis to user stats if performed
-        if (driveResults) {
-          userStats[userEmail].driveAnalysis = {
-            totalSharedDrives: driveResults.summary.totalSharedDrives,
-            totalExternalUsers: driveResults.summary.totalExternalUsers,
-            totalOrphanedFiles: driveResults.summary.totalOrphanedFiles,
-            hasExternalSharing: driveResults.summary.hasExternalSharing,
-            riskLevel: driveResults.summary.riskLevel,
-            myDriveFiles: driveResults.myDrive?.totalFiles || 0,
-            myDriveSharedFiles: driveResults.myDrive?.sharedFiles || 0,
-            myDrivePublicFiles: driveResults.myDrive?.publicFiles || 0,
-            myDriveStorageUsed: driveResults.myDrive?.storageUsed || 0
-          };
-        }
-
-        // Log user processing completion
-        streamingLogger.logUserComplete(userEmail, userStats[userEmail]);
-      }
+      await processAllUsers(usersToScan, analysers);
     }
 
-    // Log scan completion
-    const scanEndTime = new Date();
-    const scanDuration = Math.round(
-      (scanEndTime - streamingLogger.startTime) / 1000
-    );
-    streamingLogger.logScanComplete(totalStats, userStats, scanDuration);
+    // Generate final output
+    await generateOutput(usersToScan.length);
 
-    // --- OUTPUT GENERATION ---
-    if (jsonOutputFilePath) {
-      console.log(`Preparing JSON output: ${jsonOutputFilePath}`);
-
-      // Check if we should use streaming logs for consolidated JSON (more memory efficient)
-      const useStreamingConsolidation = allFilesData.length > 1000; // Use streaming for large datasets
-
-      if (useStreamingConsolidation) {
-        console.log(
-          'Large dataset detected. Using streaming logs for JSON generation...'
-        );
-        try {
-          streamingLogger.generateConsolidatedJSON(jsonOutputFilePath);
-          console.log(
-            `Streaming JSON output written to: ${jsonOutputFilePath}`
-          );
-
-          // Print log stats
-          const logStats = streamingLogger.getLogStats();
-          console.log(`Log files created:`);
-          console.log(
-            `  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`
-          );
-          console.log(
-            `  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`
-          );
-        } catch (error) {
-          console.error(
-            'Failed to generate consolidated JSON from streams. Falling back to memory-based approach.'
-          );
-          console.error(error.message);
-          // Fall through to traditional approach
-        }
-      }
-
-      if (
-        !useStreamingConsolidation ||
-        fs.existsSync(jsonOutputFilePath) === false
-      ) {
-        // Traditional approach - keep all data in memory
-        let jsonDataToWrite = {
-          summary: {
-            totalStats: JSON.parse(JSON.stringify(totalStats)),
-            userStats: JSON.parse(JSON.stringify(userStats)),
-            generationDate: new Date().toISOString(),
-          },
-          files: JSON.parse(JSON.stringify(allFilesData)),
-        };
-
-        // Add Drive analysis results if available
-        if (allDriveResults.length > 0) {
-          jsonDataToWrite.driveAnalysis = JSON.parse(JSON.stringify(allDriveResults));
-          
-          // Add global Drive summary
-          jsonDataToWrite.summary.driveAnalysisSummary = {
-            totalUsersAnalyzed: allDriveResults.length,
-            totalSharedDrives: allDriveResults.reduce((sum, result) => sum + result.summary.totalSharedDrives, 0),
-            totalExternalUsers: [...new Set(allDriveResults.flatMap(result => result.externalUsers || []))].length,
-            totalOrphanedFiles: allDriveResults.reduce((sum, result) => sum + result.summary.totalOrphanedFiles, 0),
-            usersWithExternalSharing: allDriveResults.filter(result => result.summary.hasExternalSharing).length,
-            highRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'high').length,
-            mediumRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'medium').length,
-            lowRiskUsers: allDriveResults.filter(result => result.summary.riskLevel === 'low').length
-          };
-        }
-
-        if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
-          console.log(
-            `Attempting to append to existing JSON file: ${jsonOutputFilePath}`
-          );
-          try {
-            const existingJsonString = fs.readFileSync(
-              jsonOutputFilePath,
-              'utf-8'
-            );
-            const existingJsonData = JSON.parse(existingJsonString);
-            jsonDataToWrite.files = (existingJsonData.files || []).concat(
-              jsonDataToWrite.files
-            );
-            const newTotalStats = JSON.parse(
-              JSON.stringify(existingJsonData.summary?.totalStats || {})
-            );
-            for (const key in totalStats) {
-              newTotalStats[key] = (newTotalStats[key] || 0) + totalStats[key];
-            }
-            jsonDataToWrite.summary.totalStats = newTotalStats;
-            const newUserStats = JSON.parse(
-              JSON.stringify(existingJsonData.summary?.userStats || {})
-            );
-            for (const userEmail in userStats) {
-              if (!newUserStats[userEmail]) {
-                newUserStats[userEmail] = JSON.parse(
-                  JSON.stringify(userStats[userEmail])
-                );
-              } else {
-                for (const key in userStats[userEmail]) {
-                  newUserStats[userEmail][key] =
-                    (newUserStats[userEmail][key] || 0) +
-                    userStats[userEmail][key];
-                }
-              }
-            }
-            jsonDataToWrite.summary.userStats = newUserStats;
-            jsonDataToWrite.summary.generationDate = new Date().toISOString();
-            console.log(
-              `Successfully prepared data for appending to ${jsonOutputFilePath}.`
-            );
-          } catch (e) {
-            console.error(
-              `Error reading/parsing existing JSON for append: ${e.message}. Will overwrite with current scan data as a fallback.`
-            );
-            jsonDataToWrite = {
-              summary: {
-                totalStats: JSON.parse(JSON.stringify(totalStats)),
-                userStats: JSON.parse(JSON.stringify(userStats)),
-                generationDate: new Date().toISOString(),
-              },
-              files: JSON.parse(JSON.stringify(allFilesData)),
-            };
-          }
-        } else if (
-          jsonOutputMode === 'append' &&
-          !fs.existsSync(jsonOutputFilePath)
-        ) {
-          console.log(
-            `JSON file ${jsonOutputFilePath} not found. Will create a new file.`
-          );
-        } else {
-          console.log(
-            `Overwriting or creating new JSON file: ${jsonOutputFilePath}`
-          );
-        }
-
-        try {
-          fs.writeFileSync(
-            jsonOutputFilePath,
-            JSON.stringify(jsonDataToWrite, null, 2)
-          );
-          console.log(`Audit results written to ${jsonOutputFilePath}`);
-        } catch (e) {
-          console.error(
-            `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
-          );
-          console.error(e);
-        }
-      } // End of traditional approach block
-    }
-
-    // Google Sheets output (if requested)
-    if (sheetsOutput && OUTPUT_SHEET_ID) {
-      console.log('Building Google Sheets from streaming logs...');
-
-      try {
-        const { buildSheetsFromStreamingLogs } = await import(
-          './build-sheet.js'
-        );
-        await buildSheetsFromStreamingLogs(
-          sheets,
-          OUTPUT_SHEET_ID,
-          streamingLogger.scanLogPath,
-          streamingLogger.summaryLogPath
-        );
-        console.log(
-          'Audit complete! Issue-based results written to Google Sheet.'
-        );
-      } catch (error) {
-        console.error(
-          'Failed to build sheets from streaming logs:',
-          error.message
-        );
-        console.error('Google Sheets output failed.');
-      }
-    }
-
-    // Always print data transfer report and log stats
-    dataTransferMonitor.printReport();
-
-    const logStats = streamingLogger.getLogStats();
-    console.log(`\nStreaming logs created:`);
-    console.log(
-      `  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`
-    );
-    console.log(
-      `  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`
-    );
-
-    if (!jsonOutputFilePath && !sheetsOutput) {
-      console.log('\nTo export data, use:');
-      console.log('  --json-output <path>     Export consolidated JSON');
-      console.log(
-        '  --sheets-output          Export to Google Sheets (requires OUTPUT_SHEET_ID)'
-      );
-    }
-
-    // Clean up streaming log files after processing is complete
-    cleanupStreamingLogs(streamingLogger);
+    console.log('✅ Scan completed successfully!');
   } catch (error) {
-    console.error('Audit failed:', error);
-    // Clean up streaming logs even on error
-    cleanupStreamingLogs(streamingLogger);
-    process.exit(1);
+    console.error('❌ Scan failed:', error.message);
+    throw error;
+  } finally {
+    // Always cleanup streaming logs
+    console.log('Keeping streaming logs for debugging...');
+    // StreamingLogUtils.cleanupLogs(streamingLogger);
   }
 }
 
+/**
+ * Determines which users to scan based on CLI arguments
+ */
+async function determineUsersToScan() {
+  if (singleFileId && userFilters?.length > 0) {
+    return userFilters.map((email) => ({ primaryEmail: email }));
+  }
+
+  if (!singleFileId) {
+    const allUsers = await getAllUsers();
+    return userFilters
+      ? allUsers.filter((user) =>
+          userFilters.includes(StringUtils.normaliseEmail(user.primaryEmail))
+        )
+      : allUsers;
+  }
+
+  return [];
+}
+
+/**
+ * Initialises analyser instances based on enabled features
+ */
+function initialiseAnalysers() {
+  const analysers = {};
+
+  if (featureConfig.isEnabled('calendars')) {
+    analysers.calendar = new CalendarScanner();
+  }
+
+  if (featureConfig.isEnabled('sharingAnalysis')) {
+    analysers.migration = new MigrationAnalyser();
+  }
+
+  if (featureConfig.isEnabled('driveAnalysis')) {
+    analysers.drive = new DriveAnalyser();
+  }
+
+  return analysers;
+}
+
+/**
+ * Process a single file scan
+ */
+async function processSingleFile(usersToScan, analysers) {
+  // SECURITY: Check if the single file ID is the same as the output sheet ID.
+  if (singleFileId === CONFIG.googleSheets?.outputSheetId) {
+    console.warn(
+      `Skipping scan of OUTPUT_SHEET_ID (${CONFIG.googleSheets.outputSheetId}) to prevent conflicts.`
+    );
+    return;
+  }
+
+  console.log(`Fetching metadata for single file ${singleFileId}...`);
+  let fileMetadata;
+  let contextUserEmail;
+
+  // Try to find which user owns this file by attempting to access it as each user
+  let foundOwner = false;
+
+  for (const user of usersToScan) {
+    try {
+      const userAuthClient = await apiClient.createAuthenticatedClient(
+        user.primaryEmail
+      );
+      const userDrive = google.drive({
+        version: 'v3',
+        auth: userAuthClient,
+      });
+
+      fileMetadata = await apiClient.callWithRetry(() =>
+        userDrive.files.get({
+          fileId: singleFileId,
+          fields:
+            'id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size',
+          supportsAllDrives: true,
+        })
+      );
+
+      // Track file metadata retrieval
+      dataTransferMonitor.trackFileMetadata(singleFileId, fileMetadata.data);
+
+      contextUserEmail = user.primaryEmail;
+      foundOwner = true;
+      console.log(
+        `File ${singleFileId} found in ${contextUserEmail}'s accessible files.`
+      );
+      break;
+    } catch (e) {
+      // File not accessible by this user, try next user
+      continue;
+    }
+  }
+
+  if (!foundOwner) {
+    console.error(
+      `File ${singleFileId} not found or not accessible by any user in the domain.`
+    );
+    throw new Error(`File ${singleFileId} not accessible`);
+  }
+
+  // Initialize userStats for the context user if not already present
+  if (!userStats[contextUserEmail]) {
+    userStats[contextUserEmail] = {
+      doc: 0,
+      sheet: 0,
+      slide: 0,
+      other: 0,
+      docWithLinks: 0,
+      sheetWithLinks: 0,
+      slideWithLinks: 0,
+      otherWithLinks: 0,
+      sheetWithIncompatibleFunctions: 0,
+      quotaInfo: null,
+    };
+  }
+
+  let links = [];
+  let incompatibleFunctions = [];
+  const fileType = FileTypeUtils.getFileType(fileMetadata.data.mimeType);
+  console.log(`Scanning single file: ${fileMetadata.data.name} (${fileType})`);
+
+  try {
+    switch (fileMetadata.data.mimeType) {
+      case 'application/vnd.google-apps.document':
+        links = await findLinksInDoc(singleFileId, contextUserEmail);
+        break;
+      case 'application/vnd.google-apps.spreadsheet':
+        const sheetData = await findLinksInSheet(
+          singleFileId,
+          contextUserEmail
+        );
+        links = sheetData.links;
+        incompatibleFunctions = sheetData.incompatibleFunctions;
+        break;
+      case 'application/vnd.google-apps.presentation':
+        links = await findLinksInSlide(singleFileId, contextUserEmail);
+        break;
+      default:
+        console.log(
+          `File type ${fileMetadata.data.mimeType} is not scannable for links.`
+        );
+    }
+  } catch (e) {
+    console.error(
+      `Error scanning file ${singleFileId} (${fileMetadata.data.name}): ${e.message}`
+    );
+  }
+
+  const owner = fileMetadata.data.owners?.[0]?.emailAddress || 'Unknown Owner';
+  const fileData = {
+    ownerEmail: owner,
+    fileName: fileMetadata.data.name,
+    createdTime: fileMetadata.data.createdTime,
+    modifiedTime: fileMetadata.data.modifiedTime,
+    size: fileMetadata.data.size,
+    fileId: fileMetadata.data.id,
+    fileType: fileType,
+    fileUrl: fileMetadata.data.webViewLink,
+    linkedItems: links,
+  };
+
+  if (
+    fileMetadata.data.mimeType === 'application/vnd.google-apps.spreadsheet'
+  ) {
+    fileData.incompatibleFunctions = incompatibleFunctions;
+  }
+
+  allFilesData.push(fileData);
+
+  // Stream file data for single file scan
+  streamingLogger.logFile(fileData);
+
+  console.log(
+    `Single file scan complete for ${fileMetadata.data.name}. Found ${links.length} links/references.` +
+      (incompatibleFunctions.length > 0
+        ? ` ${incompatibleFunctions.length} incompatible functions.`
+        : '')
+  );
+}
+
+/**
+ * Process all users in the domain
+ */
+async function processAllUsers(usersToScan, analysers) {
+  // Process users in batches for efficiency
+  const userBatches = ArrayUtils.chunk(usersToScan, 10);
+  let processedUsers = 0;
+
+  for (const userBatch of userBatches) {
+    await Promise.all(
+      userBatch.map(async (user, userIndex) => {
+        const globalUserIndex = processedUsers + userIndex;
+        await processUser(user, globalUserIndex, usersToScan.length, analysers);
+      })
+    );
+    processedUsers += userBatch.length;
+  }
+}
+
+/**
+ * Process a single user
+ */
+async function processUser(user, userIndex, totalUsers, analysers) {
+  try {
+    const userEmail = user.primaryEmail;
+    console.log(`Processing user ${userIndex + 1}/${totalUsers}: ${userEmail}`);
+
+    // Stream user processing start
+    streamingLogger.logUserStart(userEmail, userIndex, totalUsers);
+
+    let files = await listUserFiles(userEmail);
+    console.log(`User ${userEmail}: Found ${files.length} files. Analysing...`);
+
+    // Initialise user stats
+    userStats[userEmail] = {
+      doc: 0,
+      sheet: 0,
+      slide: 0,
+      other: 0,
+      docWithLinks: 0,
+      sheetWithLinks: 0,
+      slideWithLinks: 0,
+      otherWithLinks: 0,
+      sheetWithIncompatibleFunctions: 0,
+      quotaInfo: null,
+    };
+
+    // Perform migration analysis if enabled
+    let migrationResults = null;
+    if (analysers.migration) {
+      migrationResults = await analysers.migration.analyseUser(
+        userEmail,
+        files,
+        streamingLogger
+      );
+      allMigrationResults.push(migrationResults);
+    }
+
+    // Perform Drive analysis if enabled
+    let driveResults = null;
+    if (analysers.drive) {
+      console.log(`Analysing drives for ${userEmail}...`);
+      driveResults = await analysers.drive.analyseUserDrives(
+        userEmail,
+        streamingLogger
+      );
+      allDriveResults.push(driveResults);
+
+      // Log detailed Drive analysis
+      streamingLogger.logDriveAnalysis(userEmail, driveResults);
+    }
+
+    // Collect quota information for this user
+    try {
+      console.log(`Collecting quota information for ${userEmail}...`);
+      const driveInfo = await apiClient.getDriveInfo(userEmail);
+
+      // Also collect Gmail profile information
+      try {
+        const gmailProfile = await apiClient.getProfile('me', userEmail);
+
+        // Combine drive and Gmail data
+        userStats[userEmail].quotaInfo = {
+          ...driveInfo.data,
+          gmailProfile: gmailProfile.data,
+        };
+      } catch (gmailError) {
+        console.warn(
+          `Failed to collect Gmail profile for ${userEmail}: ${gmailError.message}`
+        );
+        userStats[userEmail].quotaInfo = driveInfo.data;
+      }
+    } catch (error) {
+      console.warn(
+        `Failed to collect quota info for ${userEmail}: ${error.message}`
+      );
+      userStats[userEmail].quotaInfo = null;
+    }
+
+    // Filter files by type if specified
+    if (fileTypeFilters) {
+      files = files.filter((file) => {
+        const fileTypeSimple = FileTypeUtils.getFileType(file.mimeType)
+          .toLowerCase()
+          .replace('google ', '');
+        return fileTypeFilters.includes(fileTypeSimple);
+      });
+      console.log(
+        `Filtered to ${files.length} files based on specified types for ${userEmail}.`
+      );
+    }
+
+    // Process each file
+    for (const [fileIdx, file] of files.entries()) {
+      if (file.id === CONFIG.googleSheets?.outputSheetId) {
+        console.warn(
+          `Skipping scan of OUTPUT_SHEET_ID (${file.id}) found in ${userEmail}'s files.`
+        );
+        continue;
+      }
+
+      const fileType = FileTypeUtils.getFileType(file.mimeType);
+      let links = [];
+      let incompatibleFunctions = [];
+
+      switch (file.mimeType) {
+        case 'application/vnd.google-apps.document':
+          totalStats.doc++;
+          userStats[userEmail].doc++;
+          try {
+            links = await findLinksInDoc(file.id, userEmail);
+          } catch (error) {
+            console.error(
+              `Error scanning Google Doc ${file.name}: ${error.message}`
+            );
+          }
+          break;
+
+        case 'application/vnd.google-apps.spreadsheet':
+          totalStats.sheet++;
+          userStats[userEmail].sheet++;
+          try {
+            const sheetData = await findLinksInSheet(file.id, userEmail);
+            links = sheetData.links;
+            incompatibleFunctions = sheetData.incompatibleFunctions;
+          } catch (error) {
+            console.error(
+              `Error scanning Google Sheet ${file.name}: ${error.message}`
+            );
+          }
+          break;
+
+        case 'application/vnd.google-apps.presentation':
+          totalStats.slide++;
+          userStats[userEmail].slide++;
+          try {
+            links = await findLinksInSlide(file.id, userEmail);
+          } catch (error) {
+            console.error(
+              `Error scanning Google Slide ${file.name}: ${error.message}`
+            );
+          }
+          break;
+
+        default:
+          totalStats.other++;
+          userStats[userEmail].other++;
+          break;
+      }
+
+      if (links.length > 0) {
+        switch (fileType) {
+          case 'Google Doc':
+            totalStats.docWithLinks++;
+            userStats[userEmail].docWithLinks++;
+            break;
+          case 'Google Sheet':
+            totalStats.sheetWithLinks++;
+            userStats[userEmail].sheetWithLinks++;
+            break;
+          case 'Google Slide':
+            totalStats.slideWithLinks++;
+            userStats[userEmail].slideWithLinks++;
+            break;
+        }
+      }
+
+      if (incompatibleFunctions.length > 0 && fileType === 'Google Sheet') {
+        totalStats.sheetWithIncompatibleFunctions++;
+        userStats[userEmail].sheetWithIncompatibleFunctions++;
+      }
+
+      // Create file data for all scanned files
+      const fileData = {
+        ownerEmail: userEmail,
+        fileName: file.name,
+        createdTime: file.createdTime,
+        modifiedTime: file.modifiedTime,
+        size: file.size,
+        fileId: file.id,
+        fileType: fileType,
+        fileUrl: file.webViewLink,
+        linkedItems: links,
+      };
+
+      if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+        fileData.incompatibleFunctions = incompatibleFunctions;
+      }
+
+      // Add migration analysis data if available
+      if (migrationResults) {
+        const fileMigrationData = migrationResults.fileAnalysis.find(
+          (f) => f.fileId === file.id
+        );
+        if (fileMigrationData) {
+          fileData.sharingAnalysis = {
+            sharing: fileMigrationData.sharing,
+            location: fileMigrationData.location,
+            overallRisk: fileMigrationData.overallRisk,
+            migrationIssues: fileMigrationData.migrationIssues,
+          };
+        }
+      }
+
+      allFilesData.push(fileData);
+
+      // Stream file data immediately
+      streamingLogger.logFile(fileData);
+    }
+
+    // Add migration analysis to user stats if performed
+    if (migrationResults) {
+      userStats[userEmail].sharingAnalysis = {
+        totalFiles: migrationResults.migrationSummary.totalFiles,
+        highRiskFiles: migrationResults.migrationSummary.highRiskFiles,
+        mediumRiskFiles: migrationResults.migrationSummary.mediumRiskFiles,
+        lowRiskFiles: migrationResults.migrationSummary.lowRiskFiles,
+        externalShares: migrationResults.migrationSummary.externalShares,
+        publicFiles: migrationResults.migrationSummary.publicFiles,
+      };
+
+      if (migrationResults.calendarAnalysis) {
+        userStats[userEmail].calendarAnalysis = {
+          totalCalendars: migrationResults.calendarAnalysis.calendars.length,
+          futureEvents: migrationResults.calendarAnalysis.futureEvents.length,
+          recurringEvents:
+            migrationResults.calendarAnalysis.recurringEvents.length,
+          externalMeetings:
+            migrationResults.calendarAnalysis.externalAttendees.length,
+          migrationRisks: migrationResults.calendarAnalysis.migrationRisks,
+          calendarDisabled:
+            migrationResults.calendarAnalysis.calendarDisabled || false,
+        };
+      }
+    }
+
+    // Add Drive analysis to user stats if performed
+    if (driveResults) {
+      userStats[userEmail].driveAnalysis = {
+        totalSharedDrives: driveResults.summary.totalSharedDrives,
+        totalExternalUsers: driveResults.summary.totalExternalUsers,
+        totalOrphanedFiles: driveResults.summary.totalOrphanedFiles,
+        hasExternalSharing: driveResults.summary.hasExternalSharing,
+        riskLevel: driveResults.summary.riskLevel,
+        myDriveFiles: driveResults.myDrive?.totalFiles || 0,
+        myDriveSharedFiles: driveResults.myDrive?.sharedFiles || 0,
+        myDrivePublicFiles: driveResults.myDrive?.publicFiles || 0,
+        myDriveStorageUsed: driveResults.myDrive?.storageUsed || 0,
+      };
+    }
+
+    // Log user processing completion
+    streamingLogger.logUserComplete(userEmail, userStats[userEmail]);
+  } catch (error) {
+    console.error(`Error processing user ${user.primaryEmail}:`, error.message);
+  }
+}
+
+/**
+ * Generate output after scanning
+ */
+async function generateOutput(totalUsers) {
+  console.log(`Processed ${totalUsers} users successfully.`);
+
+  // Log scan completion
+  const scanEndTime = new Date();
+  const scanDuration = Math.round(
+    (scanEndTime - streamingLogger.startTime) / 1000
+  );
+  streamingLogger.logScanComplete(totalStats, userStats, scanDuration);
+
+  // --- OUTPUT GENERATION ---
+  if (jsonOutputFilePath) {
+    console.log(`Preparing JSON output: ${jsonOutputFilePath}`);
+    await generateJSONOutput();
+  }
+
+  // Google Sheets output (if requested)
+  if (enableSheetsOutput && CONFIG.googleSheets?.outputSheetId) {
+    console.log('Building Google Sheets from streaming logs...');
+    await generateSheetsOutput();
+  }
+
+  // Always print data transfer report and log stats
+  dataTransferMonitor.printReport();
+
+  const logStats = streamingLogger.getLogStats();
+  console.log(`\nStreaming logs created:`);
+  console.log(
+    `  Scan log: ${streamingLogger.scanLogPath} (${logStats.scanLogSizeFormatted})`
+  );
+  console.log(
+    `  Summary log: ${streamingLogger.summaryLogPath} (${logStats.summaryLogSizeFormatted})`
+  );
+}
+
+/**
+ * Generate JSON output
+ */
+async function generateJSONOutput() {
+  // Check if we should use streaming logs for consolidated JSON (more memory efficient)
+  const useStreamingConsolidation = allFilesData.length > 1000;
+
+  if (useStreamingConsolidation) {
+    console.log(
+      'Large dataset detected. Using streaming logs for JSON generation...'
+    );
+    try {
+      streamingLogger.generateConsolidatedJSON(jsonOutputFilePath);
+      console.log(`Streaming JSON output written to: ${jsonOutputFilePath}`);
+      return;
+    } catch (error) {
+      console.error(
+        'Failed to generate consolidated JSON from streams. Falling back to memory-based approach.'
+      );
+      console.error(error.message);
+    }
+  }
+
+  // Traditional approach - keep all data in memory
+  let jsonDataToWrite = {
+    summary: {
+      totalStats: JSON.parse(JSON.stringify(totalStats)),
+      userStats: JSON.parse(JSON.stringify(userStats)),
+      generationDate: new Date().toISOString(),
+    },
+    files: JSON.parse(JSON.stringify(allFilesData)),
+  };
+
+  // Add Drive analysis results if available
+  if (allDriveResults.length > 0) {
+    jsonDataToWrite.driveAnalysis = JSON.parse(JSON.stringify(allDriveResults));
+
+    // Add global Drive summary
+    jsonDataToWrite.summary.driveAnalysisSummary = {
+      totalUsersAnalysed: allDriveResults.length,
+      totalSharedDrives: allDriveResults.reduce(
+        (sum, result) => sum + result.summary.totalSharedDrives,
+        0
+      ),
+      totalExternalUsers: [
+        ...new Set(
+          allDriveResults.flatMap((result) => result.externalUsers || [])
+        ),
+      ].length,
+      totalOrphanedFiles: allDriveResults.reduce(
+        (sum, result) => sum + result.summary.totalOrphanedFiles,
+        0
+      ),
+      usersWithExternalSharing: allDriveResults.filter(
+        (result) => result.summary.hasExternalSharing
+      ).length,
+      highRiskUsers: allDriveResults.filter(
+        (result) => result.summary.riskLevel === 'high'
+      ).length,
+      mediumRiskUsers: allDriveResults.filter(
+        (result) => result.summary.riskLevel === 'medium'
+      ).length,
+      lowRiskUsers: allDriveResults.filter(
+        (result) => result.summary.riskLevel === 'low'
+      ).length,
+    };
+  }
+
+  if (jsonOutputMode === 'append' && fs.existsSync(jsonOutputFilePath)) {
+    console.log(
+      `Attempting to append to existing JSON file: ${jsonOutputFilePath}`
+    );
+    try {
+      const existingJsonString = fs.readFileSync(jsonOutputFilePath, 'utf-8');
+      const existingJsonData = JSON.parse(existingJsonString);
+      jsonDataToWrite.files = (existingJsonData.files || []).concat(
+        jsonDataToWrite.files
+      );
+
+      const newTotalStats = JSON.parse(
+        JSON.stringify(existingJsonData.summary?.totalStats || {})
+      );
+      for (const key in totalStats) {
+        newTotalStats[key] = (newTotalStats[key] || 0) + totalStats[key];
+      }
+      jsonDataToWrite.summary.totalStats = newTotalStats;
+
+      const newUserStats = JSON.parse(
+        JSON.stringify(existingJsonData.summary?.userStats || {})
+      );
+      for (const userEmail in userStats) {
+        if (!newUserStats[userEmail]) {
+          newUserStats[userEmail] = JSON.parse(
+            JSON.stringify(userStats[userEmail])
+          );
+        } else {
+          for (const key in userStats[userEmail]) {
+            newUserStats[userEmail][key] =
+              (newUserStats[userEmail][key] || 0) + userStats[userEmail][key];
+          }
+        }
+      }
+      jsonDataToWrite.summary.userStats = newUserStats;
+      jsonDataToWrite.summary.generationDate = new Date().toISOString();
+      console.log(
+        `Successfully prepared data for appending to ${jsonOutputFilePath}.`
+      );
+    } catch (e) {
+      console.error(
+        `Error reading/parsing existing JSON for append: ${e.message}. Will overwrite with current scan data as a fallback.`
+      );
+    }
+  }
+
+  try {
+    fs.writeFileSync(
+      jsonOutputFilePath,
+      JSON.stringify(jsonDataToWrite, null, 2)
+    );
+    console.log(`Audit results written to ${jsonOutputFilePath}`);
+  } catch (e) {
+    console.error(
+      `Failed to write JSON to ${jsonOutputFilePath}: ${e.message}`
+    );
+  }
+}
+
+/**
+ * Generate Google Sheets output
+ */
+async function generateSheetsOutput() {
+  try {
+    const { buildSheetsFromStreamingLogs } = await import('./build-sheet.js');
+
+    // Use apiClient's authentication to create sheets client
+    const sheets = await apiClient.withAuth(null, (authClient) => {
+      return google.sheets({ version: 'v4', auth: authClient });
+    });
+
+    await buildSheetsFromStreamingLogs(
+      sheets,
+      CONFIG.googleSheets.outputSheetId,
+      streamingLogger.scanLogPath,
+      streamingLogger.summaryLogPath
+    );
+    console.log('Audit complete! Issue-based results written to Google Sheet.');
+  } catch (error) {
+    console.error('Failed to build sheets from streaming logs:', error.message);
+    console.error('Google Sheets output failed.');
+  }
+}
+
+// Run the main function
 main().catch((error) => {
-  console.error('Unhandled error at top level:', error, error.stack);
+  console.error('Unhandled error at top level:', error);
+  StreamingLogUtils.cleanupLogs(streamingLogger);
   process.exit(1);
 });

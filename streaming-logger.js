@@ -13,10 +13,10 @@ export class StreamingLogger {
     this.summaryLogPath = path.join(outputPath, 'summary-log.jsonl');
     this.startTime = new Date();
     
-    // Don't initialize files automatically - wait for explicit call
+    // Don't initialise files automatically - wait for explicit call
   }
 
-  initializeLogFiles() {
+  initialiseLogFiles() {
     // Clear existing log files or create new ones
     try {
       fs.writeFileSync(this.scanLogPath, '');
@@ -29,12 +29,12 @@ export class StreamingLogger {
         message: 'Google Workspace scan initiated'
       });
       
-      console.log(`Streaming logs initialized:`);
+      console.log(`Streaming logs initialised:`);
       console.log(`  Scan log: ${this.scanLogPath}`);
       console.log(`  Summary log: ${this.summaryLogPath}`);
       
     } catch (error) {
-      console.error('Failed to initialize log files:', error.message);
+      console.error('Failed to initialise log files:', error.message);
       throw error;
     }
   }
@@ -300,7 +300,7 @@ export class StreamingLogger {
         
         // Add global Drive summary
         consolidatedData.summary.driveAnalysisSummary = {
-          totalUsersAnalyzed: driveAnalysisResults.length,
+          totalUsersAnalysed: driveAnalysisResults.length,
           totalSharedDrives: driveAnalysisResults.reduce((sum, result) => sum + result.summary.totalSharedDrives, 0),
           totalExternalUsers: [...new Set(driveAnalysisResults.flatMap(result => result.externalUsers || []))].length,
           totalOrphanedFiles: driveAnalysisResults.reduce((sum, result) => sum + result.summary.totalOrphanedFiles, 0),
@@ -354,12 +354,11 @@ export class StreamingLogger {
   }
 }
 
-// Create default instance for easy importing - but don't initialize files yet
+// Create default instance for easy importing - but don't initialise files yet
 export const streamingLogger = new StreamingLogger();
 
-// Function to initialize streaming logs when actually needed
-export function initializeStreamingLogs() {
-  if (!streamingLogger.scanLogPath || !fs.existsSync(streamingLogger.scanLogPath)) {
-    streamingLogger.initializeLogFiles();
-  }
+// Function to initialise streaming logs when actually needed
+export function initialiseStreamingLogs() {
+  // Always clear and reinitialise log files for a fresh scan
+  streamingLogger.initialiseLogFiles();
 }

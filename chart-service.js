@@ -25,7 +25,6 @@ export class ChartService {
       const issuesDataRowCount = issuesData.length;
       
       if (issuesDataRowCount <= 1) {
-        console.log('No issue data found (only header row) - skipping chart creation');
         return;
       }
 
@@ -41,13 +40,15 @@ export class ChartService {
       // Write aggregated data to chart sheet
       await this.sheetManager.writeData(chartSheetName, 'A1', aggregatedData);
       
-      // Create the chart
-      const chartSpec = this.buildIssueChartSpec(chartSheetId, aggregatedData.length - 1);
+      // Calculate the number of data rows (excluding header) for logging
+      const numDataRows = aggregatedData.length > 0 ? aggregatedData.length - 1 : 0;
+      
+      // For buildIssueChartSpec, pass the total number of rows in aggregatedData
+      // as its 'dataRowCount' parameter (which is used for endRowIndex exclusive)
+      const chartSpec = this.buildIssueChartSpec(chartSheetId, aggregatedData.length);
       const chartPosition = this.buildChartPosition(chartSheetId);
       
       await this.sheetManager.createChart(chartSheetId, chartSpec, chartPosition);
-      
-      console.log(`Issue chart created in ${chartSheetName} sheet referencing ${issuesDataRowCount} rows from ${issuesSheetName} tab`);
       
     } catch (error) {
       console.error(`Failed to create issue chart: ${error.message}`);
@@ -60,7 +61,8 @@ export class ChartService {
    */
   async createAggregatedIssueData(issuesSheetName, issuesDataRowCount) {
     // Read raw issues data (skip header)
-    const issueData = await this.sheetManager.readData(issuesSheetName, `A2:A${issuesDataRowCount}`);
+    const range = `A2:A${issuesDataRowCount}`;
+    const issueData = await this.sheetManager.readData(issuesSheetName, range);
     
     // Count occurrences of each issue type
     const issueCounts = {};
@@ -77,7 +79,6 @@ export class ChartService {
       ...Object.entries(issueCounts).map(([type, count]) => [type, count])
     ];
     
-    console.log(`Created aggregated data table with ${Object.keys(issueCounts).length} issue types`);
     return aggregatedData;
   }
 
@@ -107,8 +108,8 @@ export class ChartService {
             sourceRange: {
               sources: [{
                 sheetId: chartSheetId,
-                startRowIndex: 1, // Skip header row
-                endRowIndex: 1 + dataRowCount,
+                startRowIndex: 0, // Corrected: Start from actual data, not header
+                endRowIndex: dataRowCount, // Corrected: endRowIndex is exclusive
                 startColumnIndex: 0, // Column A (Issue Type)
                 endColumnIndex: 1
               }]
@@ -121,8 +122,8 @@ export class ChartService {
             sourceRange: {
               sources: [{
                 sheetId: chartSheetId,
-                startRowIndex: 1, // Skip header row
-                endRowIndex: 1 + dataRowCount,
+                startRowIndex: 0, // Corrected: Start from actual data, not header
+                endRowIndex: dataRowCount, // Corrected: endRowIndex is exclusive
                 startColumnIndex: 1, // Column B (Count)
                 endColumnIndex: 2
               }]
@@ -131,7 +132,7 @@ export class ChartService {
           type: 'COLUMN',
           targetAxis: 'LEFT_AXIS'
         }],
-        headerCount: 0 // No headers since we're skipping row 1
+        headerCount: 1 // Specifies that the first row is a header
       }
     };
   }

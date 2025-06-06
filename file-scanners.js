@@ -4,11 +4,8 @@
  */
 
 import { google } from 'googleapis';
-import {
-  callWithRetry,
-  getAuthenticatedClientForUser,
-  processRawUrls,
-} from './API-Calls.js';
+import { apiClient } from './api-client.js';
+import { CONFIG } from './config.js';
 import {
   extractDriveLinks,
   extractFunctionNamesFromFormula,
@@ -16,6 +13,9 @@ import {
   extractHyperlinkUrls,
   extractImageUrls,
 } from './extract-helpers.js';
+
+// Create a shared API client instance for all file scanner functions
+// Use singleton apiClient instance - no need to create new instances
 
 // List of Google Sheets functions considered specific to Google Workspace,
 // which might cause compatibility issues if migrating to other platforms (e.g., Excel).
@@ -50,7 +50,7 @@ const GSUITE_SPECIFIC_FUNCTIONS = [
   'ARRAY_CONSTRAIN',
   'SORT',
   'CONCAT',
-].map((f) => f.toUpperCase()); // Standardize to uppercase for case-insensitive comparison.
+].map((f) => f.toUpperCase()); // Standardise to uppercase for case-insensitive comparison.
 
 // --- DOCS ---
 /**
@@ -75,13 +75,13 @@ const GSUITE_SPECIFIC_FUNCTIONS = [
  */
 export async function findLinksInDoc(docId, userEmail) {
   // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const userAuthClient = await apiClient.createAuthenticatedClient(userEmail);
   const docs = google.docs({ version: 'v1', auth: userAuthClient });
   const drive = google.drive({ version: 'v3', auth: userAuthClient });
   
   const DOC_FIELDS =
     'body(content(paragraph(elements(textRun(content,textStyle.link.url),inlineObjectElement(inlineObjectId))))),inlineObjects';
-  const res = await callWithRetry(() =>
+  const res = await apiClient.callWithRetry(() =>
     docs.documents.get({ documentId: docId, fields: DOC_FIELDS })
   );
   let rawUrls = [];
@@ -121,7 +121,7 @@ export async function findLinksInDoc(docId, userEmail) {
       }
     }
   }
-  return processRawUrls(drive, rawUrls);
+  return apiClient.processRawUrls(drive, rawUrls);
 }
 
 // --- SHEETS ---
@@ -134,7 +134,7 @@ export async function findLinksInDoc(docId, userEmail) {
  * other spreadsheet applications.
  *
  * @async
- * @param {string} sheetId - The ID of the Google Spreadsheet to analyze
+ * @param {string} sheetId - The ID of the Google Spreadsheet to analyse
  * @param {string} userEmail - The email of the user to impersonate for API access
  *
  * @returns {Promise<object>} An object containing:
@@ -145,12 +145,12 @@ export async function findLinksInDoc(docId, userEmail) {
  */
 export async function findLinksInSheet(sheetId, userEmail) {
   // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const userAuthClient = await apiClient.createAuthenticatedClient(userEmail);
   const sheets = google.sheets({ version: 'v4', auth: userAuthClient });
   const drive = google.drive({ version: 'v3', auth: userAuthClient });
   const SPREADSHEET_FIELDS =
     'properties.title,spreadsheetId,sheets(properties(title,sheetType,sheetId),data(rowData(values(userEnteredValue,effectiveValue,formattedValue,hyperlink,textFormatRuns.format.link.uri,dataValidation.condition.values.userEnteredValue))),charts(chartId,spec),conditionalFormats(booleanRule(condition(values(userEnteredValue)))))';
-  const res = await callWithRetry(() =>
+  const res = await apiClient.callWithRetry(() =>
     sheets.spreadsheets.get({
       spreadsheetId: sheetId,
       fields: SPREADSHEET_FIELDS,
@@ -226,7 +226,7 @@ export async function findLinksInSheet(sheetId, userEmail) {
       });
     }
   }
-  const links = await processRawUrls(drive, rawUrls);
+  const links = await apiClient.processRawUrls(drive, rawUrls);
   const incompatibleFunctions = Array.from(allFormulaFunctions).filter((fn) =>
     GSUITE_SPECIFIC_FUNCTIONS.includes(fn)
   );
@@ -255,12 +255,12 @@ export async function findLinksInSheet(sheetId, userEmail) {
  */
 export async function findLinksInSlide(slideId, userEmail) {
   // Create authenticated clients for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const userAuthClient = await apiClient.createAuthenticatedClient(userEmail);
   const slides = google.slides({ version: 'v1', auth: userAuthClient });
   const drive = google.drive({ version: 'v3', auth: userAuthClient });
   const SLIDE_FIELDS =
     'presentationId,slides(pageElements,slideProperties.notesPage.pageElements)';
-  const res = await callWithRetry(() =>
+  const res = await apiClient.callWithRetry(() =>
     slides.presentations.get({
       presentationId: slideId,
       fields: SLIDE_FIELDS,
@@ -317,17 +317,17 @@ export async function findLinksInSlide(slideId, userEmail) {
     }
   }
 
-  return processRawUrls(drive, rawUrls);
+  return apiClient.processRawUrls(drive, rawUrls);
 }
 
 // --- FILE SHARING ANALYSIS ---
 /**
- * Analyzes file sharing permissions for migration planning
+ * Analyses file sharing permissions for migration planning
  * @param {Object} file - Google Drive file object
  * @param {Object} drive - Google Drive API client
  * @returns {Object} Sharing analysis data
  */
-export async function analyzeFileSharing(file, drive) {
+export async function analyseFileSharing(file, drive) {
   const sharing = {
     isPrivate: true,
     sharedWith: [],
@@ -340,7 +340,7 @@ export async function analyzeFileSharing(file, drive) {
   };
 
   try {
-    const permissionsResponse = await callWithRetry(async () => {
+    const permissionsResponse = await apiClient.callWithRetry(async () => {
       return await drive.permissions.list({
         fileId: file.id,
         fields: 'permissions(id,type,role,emailAddress,domain,displayName,allowFileDiscovery)'
@@ -382,7 +382,7 @@ export async function analyzeFileSharing(file, drive) {
 
         // Check for external/cross-tenant sharing
         const domain = permission.emailAddress.split('@')[1];
-        const primaryDomain = process.env.PRIMARY_DOMAIN;
+        const primaryDomain = CONFIG.PRIMARY_DOMAIN;
         
         if (domain && domain !== primaryDomain) {
           sharing.externalShares.push(shareInfo);
@@ -404,7 +404,7 @@ export async function analyzeFileSharing(file, drive) {
     sharing.migrationRisk = assessSharingMigrationRisk(sharing);
 
   } catch (error) {
-    console.error(`Error analyzing sharing for ${file.id} (${file.name}):`, error.message);
+    console.error(`Error analysing sharing for ${file.id} (${file.name}):`, error.message);
     sharing.error = error.message;
   }
 
@@ -412,12 +412,12 @@ export async function analyzeFileSharing(file, drive) {
 }
 
 /**
- * Analyzes file location and folder structure for migration planning
+ * Analyses file location and folder structure for migration planning
  * @param {Object} file - Google Drive file object
  * @param {Object} drive - Google Drive API client
  * @returns {Object} Location analysis data
  */
-export async function analyzeFileLocation(file, drive) {
+export async function analyseFileLocation(file, drive) {
   const location = {
     type: 'unknown',
     ownerEmail: null,
@@ -433,7 +433,7 @@ export async function analyzeFileLocation(file, drive) {
     // Check if file is in a shared drive
     if (file.driveId) {
       try {
-        const driveInfoResponse = await callWithRetry(async () => {
+        const driveInfoResponse = await apiClient.callWithRetry(async () => {
           return await drive.drives.get({
             driveId: file.driveId,
             fields: 'id,name'
@@ -464,7 +464,7 @@ export async function analyzeFileLocation(file, drive) {
     location.migrationComplexity = assessLocationMigrationComplexity(location);
 
   } catch (error) {
-    console.error(`Error analyzing location for ${file.id} (${file.name}):`, error.message);
+    console.error(`Error analysing location for ${file.id} (${file.name}):`, error.message);
     location.error = error.message;
   }
 
@@ -480,7 +480,7 @@ export async function analyzeFileLocation(file, drive) {
  */
 async function buildFolderPath(folderId, drive, path = []) {
   try {
-    const folderResponse = await callWithRetry(async () => {
+    const folderResponse = await apiClient.callWithRetry(async () => {
       return await drive.files.get({
         fileId: folderId,
         fields: 'id,name,parents'

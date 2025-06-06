@@ -3,8 +3,7 @@ import {
   SHEET_NAMES,
   ISSUE_TYPES 
 } from "./constants.js";
-import { jsonOutputFilePath } from "./index.js";
-import { callWithRetry } from "./API-Calls.js";
+import { CONFIG } from './config.js';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
 import { SheetManager } from './sheet-manager.js';
 import { ChartService } from './chart-service.js';
@@ -16,7 +15,7 @@ import fs from 'fs';
  */
 export async function buildSheetsFromStreamingLogs(sheets, spreadsheetId, scanLogPath, summaryLogPath) {
   try {
-    // Initialize managers
+    // Initialise managers
     const sheetManager = new SheetManager(sheets, spreadsheetId);
     const chartService = new ChartService(sheets, spreadsheetId);
     
@@ -139,7 +138,7 @@ async function writeIssueBasedAuditDetails(sheetManager, fileData) {
 function buildIssueRows(fileData) {
   const rows = [];
   
-  fileData.forEach(file => {
+  fileData.forEach((file, index) => {
     // Add row for each external link
     if (file.linkedItems && file.linkedItems.length > 0) {
       file.linkedItems.forEach(link => {
@@ -275,7 +274,7 @@ export async function writeQuotaTab(sheetManager, userStats) {
   const headers = [
     'User Email',
     'Drive Quota Limit (MB)',
-    'Drive Total Usage (MB)',
+    'Organization Total Usage (MB)',
     'Drive Files Usage (MB)', 
     'Drive Trash Usage (MB)',
     'Gmail Email Address',
@@ -287,21 +286,62 @@ export async function writeQuotaTab(sheetManager, userStats) {
 
   // Prepare data rows
   const rows = [headers];
+  let quotaDataCount = 0;
   
   for (const [userEmail, stats] of Object.entries(userStats)) {
     if (stats.quotaInfo) {
+      quotaDataCount++;
       const quota = stats.quotaInfo;
+      
+      // Convert bytes to MB for storage values
+      const bytesToMB = (bytes) => bytes ? Math.round(parseInt(bytes) / (1024 * 1024)) : 'N/A';
+      
+      // Calculate Gmail storage usage - note: with pooled storage this calculation is not reliable
+      const calculateGmailUsage = () => {
+        // First check if user has Gmail service enabled
+        if (!quota.gmailProfile) {
+          return 'N/A (No Gmail Service)';
+        }
+        
+        if (quota.storageQuota?.usage && quota.storageQuota?.usageInDrive !== undefined && quota.storageQuota?.usageInDriveTrash !== undefined) {
+          const totalUsage = parseInt(quota.storageQuota.usage);
+          const driveUsage = parseInt(quota.storageQuota.usageInDrive);
+          const trashUsage = parseInt(quota.storageQuota.usageInDriveTrash);
+          
+          // Calculate Gmail usage: Total - Drive files - Drive trash (like main branch)
+          const gmailUsageBytes = Math.max(0, totalUsage - driveUsage - trashUsage);
+          
+          // In pooled storage environments, only return meaningful values for users with significant Drive usage
+          if (driveUsage > 0 || trashUsage > 0) {
+            return gmailUsageBytes > 0 ? bytesToMB(gmailUsageBytes) : 0;
+          }
+        }
+        // Return N/A for users with no Drive usage in pooled storage environments
+        return 'N/A (Pooled Storage)';
+      };
+      
+      const driveFilesUsageMB = quota.storageQuota?.usageInDrive ? bytesToMB(quota.storageQuota.usageInDrive) : 'N/A';
+      const gmailUsageMB = calculateGmailUsage();
+      
+      const rowData = [
+        userEmail,
+        quota.storageQuota?.limit ? bytesToMB(quota.storageQuota.limit) : 'N/A',
+        quota.storageQuota?.usage ? bytesToMB(quota.storageQuota.usage) : 'N/A',
+        driveFilesUsageMB,
+        quota.storageQuota?.usageInDriveTrash ? bytesToMB(quota.storageQuota.usageInDriveTrash) : 'N/A',
+        quota.user?.emailAddress || userEmail,
+        quota.gmailProfile?.messagesTotal || 'N/A',
+        quota.gmailProfile?.threadsTotal || 'N/A', 
+        quota.gmailProfile?.historyId || 'N/A',
+        gmailUsageMB
+      ];
+      
+      rows.push(rowData);
+    } else {
+      // Add row with N/A values for users without quota data
       rows.push([
         userEmail,
-        quota.driveQuota.limit,
-        quota.driveQuota.usage,
-        quota.driveQuota.usageInDrive,
-        quota.driveQuota.usageInDriveTrash,
-        quota.gmailInfo.emailAddress,
-        quota.gmailInfo.messagesTotal,
-        quota.gmailInfo.threadsTotal,
-        quota.gmailInfo.historyId,
-        quota.gmailInfo.storageUsage
+        'N/A', 'N/A', 'N/A', 'N/A', userEmail, 'N/A', 'N/A', 'N/A', 'N/A'
       ]);
     }
   }
@@ -309,7 +349,7 @@ export async function writeQuotaTab(sheetManager, userStats) {
   // Write all data at once
   await sheetManager.writeData(SHEET_NAMES.QUOTA, 'A1', rows);
   
-  console.log(`User quota information written to ${SHEET_NAMES.QUOTA} sheet.`);
+  console.log(`User quota information written to ${SHEET_NAMES.QUOTA} sheet. (${quotaDataCount}/${Object.keys(userStats).length} users with quota data)`);
 }
 
 /**
@@ -335,6 +375,7 @@ async function writeDriveAnalysisTabs(sheetManager, summaryData) {
   const sharedDrivesData = [];
   const externalSharingData = [];
   const orphanedFilesData = [];
+  const crossTenantSharesData = [];
   const driveMembersData = [];
   
   summaryData.forEach(event => {
@@ -379,7 +420,7 @@ async function writeDriveAnalysisTabs(sheetManager, summaryData) {
                 memberDisplayName: member.displayName || '',
                 memberType: member.type,
                 memberDomain: member.domain || '',
-                isExternal: member.domain !== process.env.PRIMARY_DOMAIN ? 'Yes' : 'No'
+                isExternal: member.domain !== CONFIG.PRIMARY_DOMAIN ? 'Yes' : 'No'
               });
             });
           }
@@ -397,7 +438,30 @@ async function writeDriveAnalysisTabs(sheetManager, summaryData) {
             fileSizeBytes: file.size || 0,
             fileSizeMB: file.size ? Math.round(file.size / (1024 * 1024) * 100) / 100 : 0,
             createdTime: file.createdTime || '',
-            modifiedTime: file.modifiedTime || ''
+            modifiedTime: file.modifiedTime || '',
+            category: file.category || 'orphaned',
+            reason: file.reason || 'No parent folder found'
+          });
+        });
+      }
+      
+      // Extract cross-tenant shares data
+      if (analysis.crossTenantShares && analysis.crossTenantShares.length > 0) {
+        analysis.crossTenantShares.forEach(file => {
+          crossTenantSharesData.push({
+            userEmail: event.userEmail,
+            fileName: file.name,
+            fileId: file.id,
+            mimeType: file.mimeType,
+            fileSizeBytes: file.size || 0,
+            fileSizeMB: file.size ? Math.round(file.size / (1024 * 1024) * 100) / 100 : 0,
+            createdTime: file.createdTime || '',
+            modifiedTime: file.modifiedTime || '',
+            owners: file.owners?.map(o => o.emailAddress).join(', ') || '',
+            parentFolder: file.parentFolder || '',
+            parentFolderId: file.parentFolderId || '',
+            category: file.category || 'cross-tenant-share',
+            reason: file.reason || 'Shared from external tenant'
           });
         });
       }
@@ -443,6 +507,11 @@ async function writeDriveAnalysisTabs(sheetManager, summaryData) {
     await writeOrphanedFilesSheet(sheetManager, orphanedFilesData);
   }
   
+  // Write Cross-Tenant Shares sheet
+  if (crossTenantSharesData.length > 0) {
+    await writeCrossTenantSharesSheet(sheetManager, crossTenantSharesData);
+  }
+  
   // Write Drive Members sheet
   if (driveMembersData.length > 0) {
     await writeDriveMembersSheet(sheetManager, driveMembersData);
@@ -468,6 +537,7 @@ async function writeDriveAnalysisSheet(sheetManager, driveAnalysisData) {
     'Total Shared Drives',
     'Total External Users',
     'Total Orphaned Files',
+    'Total Cross-Tenant Shares',
     'Overall Risk Level',
     'Has External Sharing',
     'Analysis Timestamp',
@@ -490,6 +560,7 @@ async function writeDriveAnalysisSheet(sheetManager, driveAnalysisData) {
       analysis.summary?.totalSharedDrives || 0,
       analysis.summary?.totalExternalUsers || 0,
       analysis.summary?.totalOrphanedFiles || 0,
+      analysis.summary?.totalCrossTenantShares || 0,
       analysis.summary?.riskLevel || 'low',
       analysis.summary?.hasExternalSharing ? 'Yes' : 'No',
       analysis.timestamp || '',
@@ -599,7 +670,9 @@ async function writeOrphanedFilesSheet(sheetManager, orphanedFilesData) {
     'File Size (MB)',
     'File Size (Bytes)',
     'Created Time',
-    'Modified Time'
+    'Modified Time',
+    'Category',
+    'Reason'
   ];
   
   const rows = [headers, ...orphanedFilesData.map(file => [
@@ -610,11 +683,55 @@ async function writeOrphanedFilesSheet(sheetManager, orphanedFilesData) {
     file.fileSizeMB,
     file.fileSizeBytes,
     file.createdTime,
-    file.modifiedTime
+    file.modifiedTime,
+    file.category,
+    file.reason
   ])];
   
   await sheetManager.writeData(SHEET_NAMES.ORPHANED_FILES, 'A1', rows);
   console.log(`Orphaned Files sheet created with ${orphanedFilesData.length} file records`);
+}
+
+/**
+ * Writes Cross-Tenant Shares sheet
+ */
+async function writeCrossTenantSharesSheet(sheetManager, crossTenantSharesData) {
+  await sheetManager.getOrCreateSheet(SHEET_NAMES.CROSS_TENANT_SHARES);
+  
+  const headers = [
+    'User Email',
+    'File Name',
+    'File ID',
+    'MIME Type',
+    'File Size (MB)',
+    'File Size (Bytes)',
+    'File Owners',
+    'Parent Folder',
+    'Parent Folder ID',
+    'Created Time',
+    'Modified Time',
+    'Category',
+    'Reason'
+  ];
+  
+  const rows = [headers, ...crossTenantSharesData.map(file => [
+    file.userEmail,
+    file.fileName,
+    file.fileId,
+    file.mimeType,
+    file.fileSizeMB,
+    file.fileSizeBytes,
+    file.owners,
+    file.parentFolder || '',
+    file.parentFolderId || '',
+    file.createdTime,
+    file.modifiedTime,
+    file.category,
+    file.reason
+  ])];
+  
+  await sheetManager.writeData(SHEET_NAMES.CROSS_TENANT_SHARES, 'A1', rows);
+  console.log(`Cross-Tenant Shares sheet created with ${crossTenantSharesData.length} file records`);
 }
 
 /**

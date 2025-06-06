@@ -4,61 +4,32 @@
  */
 
 import { google } from 'googleapis';
-import {
-  callWithRetry,
-  getAuthenticatedClientForUser,
-} from './API-Calls.js';
+import { adminApiClient, apiClient } from './api-client.js';
+import { EnvironmentConfig } from './config.js';
 import { dataTransferMonitor } from './data-transfer-monitor.js';
 
 /**
  * Retrieves all active users from Google Workspace admin API
  *
  * @async
- * @param {Object} admin - The Google Admin SDK client instance
  * @returns {Promise<Array>} A promise that resolves to an array of active user objects
  *
  * @description
- * This function uses pagination to fetch all active users from Google Workspace.
- * It filters out suspended users, archived users, and users without a primary email.
- * Each page request fetches up to 500 users.
- * The function continues fetching pages until all users have been retrieved.
- *
- * @example
- * const adminSdk = require('@googleapis/admin');
- * const admin = adminSdk.admin('directory_v1');
- * const users = await getAllUsers(admin);
+ * This function uses the AdminApiClient singleton to fetch all active users.
+ * It automatically handles pagination and filtering of suspended/archived users.
  */
-export async function getAllUsers(admin) {
-  let users = [];
-  let pageToken;
-  let pageCount = 0;
-  const MAX_USERS_PER_PAGE = 500;
-  do {
-    pageCount++;
-    const res = await callWithRetry(() =>
-      admin.users.list({
-        customer: 'my_customer',
-        maxResults: MAX_USERS_PER_PAGE,
-        pageToken,
-        orderBy: 'email',
-        query: 'isSuspended=false',
-        projection: 'full',
-      })
-    );
+export async function getAllUsers() {
+  try {
+    const users = await adminApiClient.getAllUsers();
     
     // Track this API call
-    dataTransferMonitor.trackUserList(res.data);
+    dataTransferMonitor.trackUserList({ users });
     
-    if (res.data.users?.length) {
-      users = users.concat(
-        res.data.users.filter(
-          (u) => !u.suspended && !u.archived && u.primaryEmail
-        )
-      );
-    }
-    pageToken = res.data.nextPageToken;
-  } while (pageToken);
-  return users;
+    return users;
+  } catch (error) {
+    console.error('Error fetching users:', error.message);
+    throw error;
+  }
 }
 
 /**
@@ -78,7 +49,7 @@ export async function getAllUsers(admin) {
  */
 export async function listUserFiles(userEmail) {
   // Create an authenticated client for the specific user
-  const userAuthClient = await getAuthenticatedClientForUser(userEmail);
+  const userAuthClient = await apiClient.createAuthenticatedClient(userEmail);
   const drive = google.drive({ version: 'v3', auth: userAuthClient });
   
   let files = [];
@@ -96,7 +67,7 @@ export async function listUserFiles(userEmail) {
     'nextPageToken, files(id, name, mimeType, webViewLink, owners(emailAddress), createdTime, modifiedTime, size)';
   const PAGE_SIZE = 1000;
   do {
-    const res = await callWithRetry(() =>
+    const res = await apiClient.callWithRetry(() =>
       drive.files.list({
         q,
         fields,

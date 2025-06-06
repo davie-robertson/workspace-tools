@@ -1,14 +1,16 @@
 import { google } from 'googleapis';
-import { callWithRetry } from './API-Calls.js';
+import { apiClient } from './api-client.js';
+import { CONFIG } from './config.js';
 
 /**
  * Calendar Scanner Module
- * Analyzes Google Calendar data for workspace migration planning
+ * Analyses Google Calendar data for workspace migration planning
  */
 export class CalendarScanner {
   constructor(auth) {
     this.calendar = google.calendar({ version: 'v3', auth });
-    this.primaryDomain = process.env.PRIMARY_DOMAIN;
+    this.apiClient = apiClient;
+    this.primaryDomain = CONFIG.PRIMARY_DOMAIN;
   }
 
   /**
@@ -50,7 +52,7 @@ export class CalendarScanner {
       }
       
       // Get all calendars for user
-      const calendarListResponse = await callWithRetry(async () => {
+      const calendarListResponse = await this.apiClient.callWithRetry(async () => {
         return await this.calendar.calendarList.list();
       }, 1); // Use minimal retries since we already tested access
       
@@ -60,12 +62,12 @@ export class CalendarScanner {
       }
 
       for (const cal of calendarListResponse.data.items) {
-        console.log(`  Analyzing calendar: ${cal.summary}`);
+        console.log(`  Analysing calendar: ${cal.summary}`);
         
-        const calendarData = await this.analyzeCalendar(cal);
+        const calendarData = await this.analyseCalendar(cal);
         migrationIssues.calendars.push(calendarData);
-        
-        // Analyze events in this calendar
+
+        // Analyse events in this calendar
         const events = await this.scanCalendarEvents(cal.id);
         migrationIssues.futureEvents.push(...events.future);
         migrationIssues.recurringEvents.push(...events.recurring);
@@ -90,11 +92,11 @@ export class CalendarScanner {
   }
 
   /**
-   * Analyzes a single calendar for migration issues
+   * Analyses a single calendar for migration issues
    * @param {Object} calendar - Google Calendar object
    * @returns {Object} Calendar analysis data
    */
-  async analyzeCalendar(calendar) {
+  async analyseCalendar(calendar) {
     return {
       id: calendar.id,
       name: calendar.summary,
@@ -130,7 +132,7 @@ export class CalendarScanner {
   /**
    * Scans events in a specific calendar
    * @param {string} calendarId - Calendar ID to scan
-   * @returns {Object} Categorized events
+   * @returns {Object} Categorised events
    */
   async scanCalendarEvents(calendarId) {
     const now = new Date();
@@ -145,7 +147,7 @@ export class CalendarScanner {
     };
 
     try {
-      const response = await callWithRetry(async () => {
+      const response = await this.apiClient.callWithRetry(async () => {
         return await this.calendar.events.list({
           calendarId,
           timeMin: now.toISOString(),
@@ -161,8 +163,8 @@ export class CalendarScanner {
       }
 
       for (const event of response.data.items) {
-        const analysis = this.analyzeEvent(event, calendarId);
-        
+        const analysis = this.analyseEvent(event, calendarId);
+
         if (analysis.isFuture) events.future.push(analysis);
         if (analysis.isRecurring) events.recurring.push(analysis);
         if (analysis.hasExternalAttendees) events.external.push(analysis);
@@ -177,12 +179,12 @@ export class CalendarScanner {
   }
 
   /**
-   * Analyzes a single calendar event for migration issues
+   * Analyses a single calendar event for migration issues
    * @param {Object} event - Google Calendar event
    * @param {string} calendarId - Calendar ID containing the event
    * @returns {Object} Event analysis data
    */
-  analyzeEvent(event, calendarId) {
+  analyseEvent(event, calendarId) {
     const startTime = event.start?.dateTime || event.start?.date;
     const endTime = event.end?.dateTime || event.end?.date;
     
@@ -207,7 +209,7 @@ export class CalendarScanner {
       migrationComplexity: 'low'
     };
 
-    // Analyze attendees for external domains
+    // Analyse attendees for external domains
     if (event.attendees) {
       for (const attendee of event.attendees) {
         if (attendee.email) {
@@ -304,7 +306,7 @@ export class CalendarScanner {
       summary.migrationRecommendations.push('Many high-risk events detected - consider phased migration approach');
     }
 
-    // Convert Set to Array for JSON serialization
+    // Convert Set to Array for JSON serialisation
     summary.externalDomains = Array.from(summary.externalDomains);
 
     return summary;
