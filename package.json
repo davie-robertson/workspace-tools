@@ -4,7 +4,17 @@
   "description": "Scan Google Workspace files for all users, count them, list links to other Workspace files, and check for functions/formulas in Google Sheets that might cause migration issues.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "server": "node server/cloud-run-server.js",
+    "dev": "NODE_ENV=development node server/cloud-run-server.js",
+    "deploy": "./deploy.sh",
+    "deploy:setup": "./deploy.sh setup-only",
+    "deploy:build": "./deploy.sh build-only",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:migration": "node migration/migration-utils.js validate",
+    "legacy": "USE_NEW_ARCHITECTURE=false node index.js"
   },
   "type": "module",
   "keywords": [
@@ -19,6 +29,49 @@
   "license": "MIT",
   "dependencies": {
     "dotenv": "^16.4.5",
-    "googleapis": "^133.0.0"
+    "googleapis": "^133.0.0",
+    "ioredis": "^5.3.2",
+    "@google-cloud/bigquery": "^7.3.0",
+    "express": "^4.18.2",
+    "compression": "^1.7.4",
+    "helmet": "^7.1.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "@jest/globals": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "globals": {
+      "__ESM__": true
+    },
+    "testMatch": [
+      "**/__tests__/**/*.test.js",
+      "**/*.test.js"
+    ],
+    "collectCoverageFrom": [
+      "**/*.js",
+      "!**/node_modules/**",
+      "!**/coverage/**",
+      "!jest.config.js",
+      "!**/*.test.js",
+      "!**/test-setup.js",
+      "!**/deploy.sh"
+    ],
+    "coverageReporters": [
+      "text",
+      "lcov",
+      "html"
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/setup.js"
+    ],
+    "testTimeout": 30000,
+    "moduleFileExtensions": [
+      "js",
+      "json"
+    ],
+    "transform": {}
   }
 }

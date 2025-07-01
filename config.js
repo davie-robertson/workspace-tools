@@ -43,6 +43,64 @@ export class EnvironmentConfig {
     return process.env.PRIMARY_DOMAIN;
   }
   
+  // Caching Configuration
+  get enableCaching() {
+    return process.env.ENABLE_CACHING !== 'false';
+  }
+  
+  get redisUrl() {
+    return process.env.REDIS_URL;
+  }
+  
+  get redisHost() {
+    return process.env.REDIS_HOST || 'localhost';
+  }
+  
+  get redisPort() {
+    return parseInt(process.env.REDIS_PORT) || 6379;
+  }
+  
+  get redisPassword() {
+    return process.env.REDIS_PASSWORD;
+  }
+  
+  get cacheDataset() {
+    return process.env.CACHE_DATASET || 'workspace_cache';
+  }
+  
+  get metadataTtl() {
+    return parseInt(process.env.METADATA_TTL) || 3600;
+  }
+  
+  get analysisTtl() {
+    return parseInt(process.env.ANALYSIS_TTL) || 7200;
+  }
+  
+  get batchSize() {
+    return parseInt(process.env.BATCH_SIZE) || 50;
+  }
+  
+  get googleCloudProject() {
+    // First check if explicitly set in environment
+    if (process.env.GOOGLE_CLOUD_PROJECT) {
+      return process.env.GOOGLE_CLOUD_PROJECT;
+    }
+    
+    // Otherwise, try to extract from service account JSON file
+    try {
+      const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (credentialsPath) {
+        const fs = require('fs');
+        const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+        return credentials.project_id;
+      }
+    } catch (error) {
+      console.warn('Could not extract project ID from service account file:', error.message);
+    }
+    
+    return undefined;
+  }
+
   // Validation methods
   validateRequired() {
     const requiredVars = ['ADMIN_USER', 'GOOGLE_APPLICATION_CREDENTIALS'];

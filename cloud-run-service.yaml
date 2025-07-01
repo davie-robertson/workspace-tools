@@ -1,0 +1,76 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+  name: workspace-tools
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "true"
+        autoscaling.knative.dev/maxScale: "10"
+        autoscaling.knative.dev/minScale: "0"
+    spec:
+      containerConcurrency: 10
+      timeoutSeconds: 3600
+      containers:
+      - image: gcr.io/PROJECT_ID/workspace-tools:latest
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "8080"
+        - name: GOOGLE_CLOUD_PROJECT
+          value: "PROJECT_ID"
+        - name: ENABLE_CACHING
+          value: "true"
+        - name: CACHE_DATASET
+          value: "workspace_cache"
+        - name: BATCH_SIZE
+          value: "25"
+        - name: METADATA_TTL
+          value: "3600"
+        - name: ANALYSIS_TTL
+          value: "7200"
+        # Redis connection (Cloud Memorystore)
+        - name: REDIS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: workspace-tools-secrets
+              key: redis-host
+        - name: REDIS_PORT
+          value: "6379"
+        # Google Workspace credentials
+        - name: ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: workspace-tools-secrets
+              key: admin-user
+        - name: PRIMARY_DOMAIN
+          valueFrom:
+            secretKeyRef:
+              name: workspace-tools-secrets
+              key: primary-domain
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/secrets/gcp-credentials/key.json"
+        volumeMounts:
+        - name: gcp-credentials
+          mountPath: "/secrets/gcp-credentials"
+          readOnly: true
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-service-account-key

@@ -33,18 +33,12 @@ async function main() {
     envConfig.validateRequired();
 
     console.log(`🚀 Starting Workspace Tools v2.0`);
-    console.log(`📋 Architecture: ${useNewArchitecture ? 'New' : 'Legacy'}`);
+    console.log(`📋 Architecture: ${useNewArchitecture ? 'New (Cached)' : 'Legacy'}`);
     
     if (useNewArchitecture) {
-      const cachingEnabled = process.env.ENABLE_CACHING === 'true';
-      if (cachingEnabled) {
-        console.log('💡 Using new cached architecture with Redis + in-memory BigQuery');
-        console.log('   Benefits: 90% fewer API calls, 75% faster scans, smart caching');
-        console.log('   Note: BigQuery persistence disabled (free tier mode)');
-      } else {
-        console.log('💡 Using new architecture without caching (local testing mode)');
-        console.log('   Note: Enable caching for production performance benefits');
-      }
+      console.log('💡 Using new cached architecture with Redis + in-memory BigQuery');
+      console.log('   Benefits: 90% fewer API calls, 75% faster scans, smart caching');
+      console.log('   Note: BigQuery persistence disabled (free tier mode)');
       
       // Use new architecture
       const wrapper = new LegacyCliWrapper();
